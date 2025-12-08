@@ -6,10 +6,10 @@
 #SBATCH --gres=gpu:L40S:8
 #SBATCH --nodes=1
 #SBATCH --time=2-00:00:00
-#SBATCH --mem=512G
-#SBATCH --cpus-per-task=32
+#SBATCH --mem=750G
+#SBATCH --cpus-per-task=64
 #SBATCH --ntasks-per-node=1
-#SBATCH --exclude=babel-q5-28,babel-o5-20
+#SBATCH --exclude=babel-q5-28,babel-o5-20,babel-n5-28,babel-q5-24,babel-p5-20,babel-q5-20,babel-q5-32,babel-o9-20,babel-q9-28,babel-s9-16,babel-t5-24,babel-p5-32
 
 . .env
 
@@ -26,8 +26,9 @@ done
 MODEL_ALIAS=$(echo $MODEL | sed 's/\//-/g')
 # Get number of GPUs available
 NUM_GPUS=$(nvidia-smi -L | wc -l)
-N_ROLLOUTS="${N_ROLLOUTS:-4}"
-MAX_LENGTH=2048
+N_ROLLOUTS="${N_ROLLOUTS:-8}"
+BATCH_SIZE=4
+MAX_LENGTH=8192
 RUN_NAME="code_search_${MODEL_ALIAS}"
 set -x
 
@@ -40,9 +41,7 @@ NUM_INFERENCE_ENGINES=4
 TP_SIZE=1
 LOGGER=wandb
 
-# We use a small batch size here for demonstration
-# NOTE (sumanthrh): The `generator.max_turns` here is actually unused, and we use the `step_limit` from the `swebench.yaml` file. 
-CUDA_LAUNCH_BLOCKING=1 uv run --isolated -m src.train \
+uv run --isolated --frozen -m src.train \
   +run_async_trainer=true \
   data.train_data="['$DATA_PATH/train.parquet']" \
   data.val_data="['$DATA_PATH/validation.parquet']" \
@@ -54,7 +53,7 @@ CUDA_LAUNCH_BLOCKING=1 uv run --isolated -m src.train \
   trainer.policy.fsdp_config.cpu_offload=true \
   trainer.policy.fsdp_config.reshard_after_forward=true \
   trainer.policy.fsdp_config.fsdp_size=-1 \
-  trainer.fully_async.num_parallel_generation_workers=16 \
+  trainer.fully_async.num_parallel_generation_workers=20 \
   trainer.placement.policy_num_gpus_per_node=2 \
   trainer.placement.ref_num_gpus_per_node=2 \
   trainer.placement.policy_num_nodes=1 \
@@ -69,8 +68,8 @@ CUDA_LAUNCH_BLOCKING=1 uv run --isolated -m src.train \
   trainer.eval_before_train=false \
   trainer.eval_interval=100 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=4 \
-  trainer.policy_mini_batch_size=4 \
+  trainer.train_batch_size=${BATCH_SIZE} \
+  trainer.policy_mini_batch_size=${BATCH_SIZE} \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.dump_data_batch=true \
@@ -92,7 +91,7 @@ CUDA_LAUNCH_BLOCKING=1 uv run --isolated -m src.train \
   generator.batched=false \
   generator.n_samples_per_prompt=${N_ROLLOUTS} \
   generator.gpu_memory_utilization=0.75 \
-  generator.enforce_eager=true \
+  generator.enforce_eager=false \
   trainer.logger="$LOGGER" \
   trainer.project_name="code_search" \
   trainer.run_name=${RUN_NAME} \
