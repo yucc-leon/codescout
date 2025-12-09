@@ -1,5 +1,6 @@
 import json
 import asyncio
+from pyexpat.errors import messages
 from socket import timeout
 from typing import Dict, List, Optional, Any, Tuple, Union
 import uuid
@@ -10,8 +11,13 @@ import requests
 from pathlib import Path
 import os
 import ast
+<<<<<<< HEAD
 import time
 from datetime import datetime
+=======
+import numpy as np
+from collections import defaultdict
+>>>>>>> f633a65 (rl run with only terminal tool)
 
 import signal
 from contextlib import contextmanager
@@ -35,6 +41,8 @@ from openhands.sdk.conversation.response_utils import get_agent_final_response
 from openhands.workspace import DockerWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.planning import get_planning_tools
+from openhands.tools.terminal import TerminalTool
+from openhands.sdk.tool import Tool
 from openhands.sdk import (
     Agent,
     LLM,
@@ -104,6 +112,8 @@ def init_and_run(
             }
         ),
         tools=get_planning_tools(),
+        # tools=[Tool(name=TerminalTool.name)],
+        # tools=get_default_tools(enable_browser=False),
         security_analyzer=None,
     )
 
@@ -178,6 +188,76 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                 "OpenhandsGenerator doesn't support custom chat template"
             )
 
+    def _compute_trajectory_metrics(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Compute trajectory-level metrics including turns and tool calls.
+        
+        Args:
+            messages: List of event dictionaries from the conversation
+            
+        Returns:
+            Dictionary with trajectory metrics:
+                - num_turns: Number of LLM responses (TokenEvents)
+                - num_tool_calls: Total number of tool calls (ActionEvents)
+                - num_tool_calls_per_turn: Average tool calls per turn
+                - tool_calls_by_turn: List of tool call counts for each turn
+        """
+        # Count turns (TokenEvents)
+        token_messages = [msg for msg in messages if msg.get("kind") == "TokenEvent"]
+        num_turns = len(token_messages)
+        
+        # Count tool calls (ActionEvents) and group by llm_response_id for parallel calls
+        action_messages = [msg for msg in messages if msg.get("kind") == "ActionEvent"]
+        num_tool_calls = len(action_messages)
+        
+        # Group tool calls by llm_response_id to understand parallel tool calling
+        tool_calls_by_response = defaultdict(int)
+        for action in action_messages:
+            llm_response_id = action.get("llm_response_id")
+            if llm_response_id:
+                tool_calls_by_response[llm_response_id] += 1
+        
+        # Get list of tool call counts per turn
+        tool_calls_by_turn = list(tool_calls_by_response.values())
+        
+        # Compute average tool calls per turn
+        num_tool_calls_per_turn = num_tool_calls / num_turns if num_turns > 0 else 0.0
+        
+        return {
+            "num_turns": num_turns,
+            "num_tool_calls": num_tool_calls,
+            "num_tool_calls_per_turn": num_tool_calls_per_turn,
+            "tool_calls_by_turn": tool_calls_by_turn,
+        }
+
+    def _aggregate_trajectory_metrics(self, trajectory_metrics_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Aggregate trajectory metrics across a batch.
+        
+        Args:
+            trajectory_metrics_list: List of trajectory metrics dictionaries
+            
+        Returns:
+            Dictionary with aggregated batch-level metrics:
+                - trajectory/avg_num_turns: Average number of turns per trajectory
+                - trajectory/avg_num_tool_calls: Average number of tool calls per trajectory
+                - trajectory/avg_tool_calls_per_turn: Average tool calls per turn across all trajectories
+        """
+        if not trajectory_metrics_list:
+            return {}
+        
+        # Extract metrics from each trajectory
+        num_turns_list = [m.get("num_turns", 0) for m in trajectory_metrics_list]
+        num_tool_calls_list = [m.get("num_tool_calls", 0) for m in trajectory_metrics_list]
+        num_tool_calls_per_turn_list = [m.get("num_tool_calls_per_turn", 0.0) for m in trajectory_metrics_list]
+        
+        # Compute batch-level averages
+        return {
+            "trajectory/avg_num_turns": float(np.mean(num_turns_list)) if num_turns_list else 0.0,
+            "trajectory/avg_num_tool_calls": float(np.mean(num_tool_calls_list)) if num_tool_calls_list else 0.0,
+            "trajectory/avg_tool_calls_per_turn": float(np.mean(num_tool_calls_per_turn_list)) if num_tool_calls_per_turn_list else 0.0,
+        }
+
     async def code_search_loop(
         self,
         prompt: ConversationType,
@@ -187,7 +267,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         sampling_params: Dict[str, Any],
         trajectory_id: TrajectoryID,
         batch_metadata: BatchMetadata,
-    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]]]:
+    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]], Optional[Dict[str, Any]]]:
         # sweagent_config = yaml.safe_load(get_config_path(self.generator_cfg.miniswe_config_path).read_text())
         # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
         instance = env_extras
@@ -269,6 +349,9 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                 messages=messages,
                 **additional_attr,
             )
+
+            # Compute trajectory metrics (turns and tool calls)
+            trajectory_metrics = self._compute_trajectory_metrics(messages)
         else:
             efficiency_metrics = {
                 "tokens": 0,
@@ -276,12 +359,14 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                 "avg_tool_calls_per_step": 0.0,
                 "wall_clock_duration": additional_attr["wall_clock_duration"],
             }
+            trajectory_metrics = {}
 
         print(f"Efficiency metrics: {efficiency_metrics}")
 
         metrics_dict = {
             **metrics_dict,
             **efficiency_metrics,
+            **trajectory_metrics
         }
 
         #     # print("=" * 100)
@@ -306,7 +391,8 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                         "complete",
                         [1]*len(current_response_ids),
                         current_prompt_ids,
-                        None
+                        None,
+                        trajectory_metrics
                     )
                 )
 
@@ -315,8 +401,9 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             stop_reason = "error"
             loss_mask = [1]
             initial_input_ids = [151643]
+            trajectory_metrics = {}  # Empty metrics for error case
             rollout_list.append(
-                (response_ids, reward, stop_reason, loss_mask, initial_input_ids, None)
+                (response_ids, reward, stop_reason, loss_mask, initial_input_ids, None, trajectory_metrics)
             )
 
 
@@ -440,11 +527,18 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         prompt_token_ids = [
             output[4] for output in all_outputs if output[0] is not None
         ]
+        trajectory_metrics_list = [
+            output[6] if len(output) > 6 else {} for output in all_outputs if output[0] is not None
+        ]
         if not len(responses):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."
             )
         rollout_metrics = get_rollout_metrics(responses, rewards)
+        
+        # Aggregate trajectory metrics across the batch
+        batch_trajectory_metrics = self._aggregate_trajectory_metrics(trajectory_metrics_list)
+        rollout_metrics.update(batch_trajectory_metrics)
 
         tracked_metrics = {}
         # Aggregate Rewards
