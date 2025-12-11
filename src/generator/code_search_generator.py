@@ -281,7 +281,6 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         trajectory_metrics = compute_trajectory_metrics(messages)
 
         metrics_dict = {
-            **metrics_dict,
             **efficiency_metrics,
             **trajectory_metrics
         }

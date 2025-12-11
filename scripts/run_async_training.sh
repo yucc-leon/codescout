@@ -42,7 +42,7 @@ HALF_NUM_GPUS=$((NUM_GPUS / 2))
 NUM_INFERENCE_ENGINES="${NUM_INFERENCE_ENGINES:-$HALF_NUM_GPUS}"
 NUM_TRAINING_ENGINES="${NUM_TRAINING_ENGINES:-$HALF_NUM_GPUS}"
 
-uv run --isolated --frozen -m src.train \
+uv run --isolated -m src.train \
   +run_async_trainer=true \
   data.train_data="['$DATA_PATH/train.parquet']" \
   data.val_data="['$DATA_PATH/validation.parquet']" \
