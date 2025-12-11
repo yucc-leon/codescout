@@ -55,6 +55,8 @@ def compute_step_count(messages: List[Dict[str, Any]]) -> int:
     Returns:
         Number of TokenEvent messages (agent turns)
     """
+    if not messages:
+        return 0
     token_messages = [msg for msg in messages if msg.get("kind") == "TokenEvent"]
     return len(token_messages)
 
@@ -75,6 +77,12 @@ def compute_tool_call_metrics(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Find all assistant messages with tool calls
     tool_call_count = 0
     tool_breakdown = {}
+    if not messages:
+        return {
+            "total_tool_calls": 0,
+            "avg_tool_calls_per_step": 0.0,
+            "tool_call_breakdown": {},
+        }
 
     for msg in messages:
         # Assistant messages contain tool_calls field
