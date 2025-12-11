@@ -11,13 +11,10 @@ import requests
 from pathlib import Path
 import os
 import ast
-<<<<<<< HEAD
 import time
 from datetime import datetime
-=======
 import numpy as np
 from collections import defaultdict
->>>>>>> f633a65 (rl run with only terminal tool)
 
 import signal
 from contextlib import contextmanager
