@@ -262,7 +262,8 @@ class CodeSearchGenerator(SkyRLGymGenerator):
 
         print(f"Reward details: {reward_dict}, Total reward: {reward}")
 
-        # Compute efficiency metrics
+        # Compute Trajectory Metrics
+        metrics_dict = {}
         if messages != []:
             efficiency_metrics = compute_all_efficiency_metrics(
                 messages=messages,
@@ -277,6 +278,11 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             }
 
         print(f"Efficiency metrics: {efficiency_metrics}")
+
+        metrics_dict = {
+            **metrics_dict,
+            **efficiency_metrics,
+        }
 
         #     # print("=" * 100)
         #     # print("Conversation finished. Got the following LLM messages:")
@@ -376,7 +382,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                 "reward_dict": reward_dict,
                 "final_message": final_message,
                 "messages": messages,
-                "efficiency_metrics": efficiency_metrics,
+                "metrics_dict": metrics_dict,
             }
 
             print(f"Saving trajectory to {filename_path}")
@@ -384,7 +390,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                 json.dump(result_dict, f, indent=2) #, sort_keys=True, ensure_ascii=False)
 
         # return (response_ids, reward, stop_reason, loss_mask, initial_input_ids, None)
-        return [rollout_list[-1], reward_dict]
+        return [rollout_list[-1], reward_dict, metrics_dict]
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
@@ -422,8 +428,9 @@ class CodeSearchGenerator(SkyRLGymGenerator):
 
         collected_task_rollouts = await asyncio.gather(*task_rollouts)
 
-        reward_dict = [rollout[1] for rollout in collected_task_rollouts]
         all_outputs = [rollout[0] for rollout in collected_task_rollouts]
+        rewards_dict = [rollout[1] for rollout in collected_task_rollouts]
+        metrics_dict = [rollout[2] for rollout in collected_task_rollouts]
 
         # Filter out the `None` entries, which means that trajectory generation failed
         responses = [output[0] for output in all_outputs if output[0] is not None]
@@ -439,17 +446,24 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             )
         rollout_metrics = get_rollout_metrics(responses, rewards)
 
-        # This is supposedly where I can add custom wandb logs
-        reward_metrics = {}
-        for reward_dict_item in reward_dict:
+        tracked_metrics = {}
+        # Aggregate Rewards
+        for reward_dict_item in rewards_dict:
             for k, v in reward_dict_item.items():
-                if f"reward/{k}" not in reward_metrics:
-                    reward_metrics[f"reward/{k}"] = []
-                reward_metrics[f"reward/{k}"].append(v)
+                if f"reward/{k}" not in tracked_metrics:
+                    tracked_metrics[f"reward/{k}"] = []
+                tracked_metrics[f"reward/{k}"].append(v)
 
-        # Average the reward metrics over the batch
-        for k, v in reward_metrics.items():
-            reward_metrics[k] = sum(v) / len(v)
+        # Aggregate Trajectory Metrics
+        for metrics_dict_item in metrics_dict:
+            for k, v in metrics_dict_item.items():
+                if f"metrics/{k}" not in tracked_metrics:
+                    tracked_metrics[f"metrics/{k}"] = []
+                tracked_metrics[f"metrics/{k}"].append(v)
+        
+        # Average all tracked metrics
+        for k, v in tracked_metrics.items():
+            tracked_metrics[k] = sum(v) / len(v)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": prompt_token_ids,
@@ -459,7 +473,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": None,
-            **reward_metrics,
+            **tracked_metrics,
         }
 
         return generator_output
