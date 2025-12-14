@@ -498,7 +498,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": None,
-            # "is_last_step": is_last_step,
+            "is_last_step": is_last_step,
             **tracked_metrics,
         }
 
