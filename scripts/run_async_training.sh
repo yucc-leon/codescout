@@ -67,7 +67,7 @@ uv run --isolated -m src.train \
   trainer.policy.sequence_parallel_size=1 \
   generator.num_inference_engines=${NUM_INFERENCE_ENGINES} \
   generator.inference_engine_tensor_parallel_size=1 \
-  +generator.traj_dir=$CKPT_PATH/trajectories/ \
+  +generator.traj_dir=${CKPT_PATH}trajectories/ \
   +generator.engine_init_kwargs="{enable_auto_tool_choice:true,tool_call_parser:hermes,reasoning_parser:qwen3}" \
   trainer.epochs=20 \
   trainer.eval_batch_size=100 \
