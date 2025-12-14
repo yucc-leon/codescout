@@ -47,14 +47,20 @@ def reward_function(
     gt_files = []
     gt_modules = []
     gt_entities = []
+    reward = 0
 
     for change in instance.get("file_changes", []):
         if "file" in change:
             gt_files.append(change["file"])
         if "changes" in change:
-            for module in change["changes"].get("edited_modules", []):
+            edited_modules = change["changes"].get("edited_modules", [])
+            edited_modules = [] if edited_modules is None else edited_modules
+            for module in edited_modules:
                 gt_modules.append(module)
-            for entity in change["changes"].get("edited_entities", []):
+
+            edited_entities = change["changes"].get("edited_entities", [])
+            edited_entities = [] if edited_entities is None else edited_entities
+            for entity in edited_entities:
                 gt_entities.append(entity)
     gt_files = set(gt_files)
     gt_modules = set(gt_modules)
@@ -66,6 +72,11 @@ def reward_function(
     module_f1_score = compute_file_f1_score(predicted_modules, gt_modules)
     entity_f1_score = compute_file_f1_score(predicted_entities, gt_entities)
 
+    # weight_total = file_level_weight + module_level_weight + entity_level_weight
+    # file_level_weight /= weight_total
+    # module_level_weight /= weight_total
+    # entity_level_weight /= weight_total
+
     reward = (
         file_f1_score * file_level_weight
     + module_f1_score * module_level_weight
@@ -73,6 +84,7 @@ def reward_function(
     )
 
     return reward, {
+        "multilevel_localization_f1_reward": reward,
         "file_reward": file_f1_score,
         "module_reward": module_f1_score,
         "entity_reward": entity_f1_score,
