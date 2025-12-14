@@ -37,9 +37,7 @@ def patched_concatenate_generator_outputs(generator_outputs: List[GeneratorOutpu
             if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
-        # "trajectory_ids": output["trajectory_ids"],
         "trajectory_ids": sum([output["trajectory_ids"] for output in generator_outputs], []),
-        # "is_last_step": sum([output["is_last_step"] for output in generator_outputs], []),
     }
 
     # propagate additional keys with list values as-is
