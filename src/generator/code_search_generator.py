@@ -1,3 +1,4 @@
+import copy
 import json
 import asyncio
 from pyexpat.errors import messages
@@ -86,7 +87,7 @@ def init_and_run(
     
     # Avoid collisions in /tmp testbed directories
     uuid_str = str(uuid.uuid4())[:8]
-    workspace = Path(f"/scratch/lsutawik/tmp/testbed/{uuid_str}/")
+    workspace = Path(f"/tmp/testbed/{uuid_str}/")
     status, working_dir = clone_instance(repo_name, commit_id, instance_id, workspace)
 
     if training_phase == "eval":
@@ -99,7 +100,7 @@ def init_and_run(
 
     agent = Agent(
         llm=LLM(
-            service_id="agent",
+            usage_id="agent",
             model=litellm_model_name,
             base_url=f"http://localhost:8080/v1/",
             api_key="sk-xxx",
@@ -395,7 +396,8 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                 json.dump(result_dict, f, indent=2) #, sort_keys=True, ensure_ascii=False)
 
         # return (response_ids, reward, stop_reason, loss_mask, initial_input_ids, None)
-        return [rollout_list[-1], reward_dict, metrics_dict]
+        # return [rollout_list[-1], reward_dict, metrics_dict]
+        return [rollout_list, reward_dict, metrics_dict]
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
@@ -437,14 +439,31 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         rewards_dict = [rollout[1] for rollout in collected_task_rollouts]
         metrics_dict = [rollout[2] for rollout in collected_task_rollouts]
 
-        # Filter out the `None` entries, which means that trajectory generation failed
-        responses = [output[0] for output in all_outputs if output[0] is not None]
-        rewards = [output[1] for output in all_outputs if output[0] is not None]
-        stop_reasons = [output[2] for output in all_outputs if output[0] is not None]
-        loss_masks = [output[3] for output in all_outputs if output[0] is not None]
-        prompt_token_ids = [
-            output[4] for output in all_outputs if output[0] is not None
-        ]
+        responses = sum([[output[0] for output in step_outputs] for step_outputs in all_outputs], [])
+        rewards = sum([[output[1] for output in step_outputs] for step_outputs in all_outputs], [])
+        stop_reasons = sum([[output[2] for output in step_outputs] for step_outputs in all_outputs], [])
+        loss_masks = sum([[output[3] for output in step_outputs] for step_outputs in all_outputs], [])
+        prompt_token_ids = sum([[output[4] for output in step_outputs] for step_outputs in all_outputs], [])
+
+        # # Filter out the `None` entries, which means that trajectory generation failed
+        # responses = [output[0] for output in all_outputs if output[0] is not None]
+        # rewards = [output[1] for output in all_outputs if output[0] is not None]
+        # stop_reasons = [output[2] for output in all_outputs if output[0] is not None]
+        # loss_masks = [output[3] for output in all_outputs if output[0] is not None]
+        # prompt_token_ids = [
+        #     output[4] for output in all_outputs if output[0] is not None
+        # ]
+
+        out_trajectory_ids = []
+        is_last_step = []
+        for i in range(len(all_outputs)):
+            step_outputs = all_outputs[i]
+            for step_id in range(len(step_outputs)):
+                out_trajectory_id = copy.deepcopy(trajectory_ids[i])
+                out_trajectory_id.step = step_id
+                out_trajectory_ids.append(out_trajectory_id.instance_id)
+                is_last_step.append(step_id == len(step_outputs) - 1)
+
         if not len(responses):
             raise ValueError(
                 "Found no valid responses for this step. This means that generation failed for all trajectories, likely due to errors in environment setup."
@@ -471,6 +490,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             tracked_metrics[k] = sum(v) / len(v)
 
         generator_output: GeneratorOutput = {
+            "trajectory_ids": out_trajectory_ids,
             "prompt_token_ids": prompt_token_ids,
             "response_ids": responses,
             "rewards": rewards,
@@ -478,6 +498,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             "stop_reasons": stop_reasons,
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": None,
+            # "is_last_step": is_last_step,
             **tracked_metrics,
         }
 

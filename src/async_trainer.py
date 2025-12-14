@@ -37,6 +37,9 @@ def patched_concatenate_generator_outputs(generator_outputs: List[GeneratorOutpu
             if generator_outputs[0]["rollout_logprobs"] is not None
             else None
         ),
+        # "trajectory_ids": output["trajectory_ids"],
+        "trajectory_ids": sum([output["trajectory_ids"] for output in generator_outputs], []),
+        # "is_last_step": sum([output["is_last_step"] for output in generator_outputs], []),
     }
 
     # propagate additional keys with list values as-is
@@ -111,6 +114,7 @@ class CustomFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
         )
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
+        uids = generator_output["trajectory_ids"]
         generator_output = self.postprocess_generator_output(generator_output, uids)
 
         # print example just for debugging
