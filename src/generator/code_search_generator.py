@@ -122,7 +122,7 @@ def init_and_run(
 
     conversation = Conversation(
         agent=agent,
-        max_iteration_per_run=20,
+        max_iteration_per_run=15,
         visualizer=None,
         workspace=str(working_dir),
     )
@@ -243,20 +243,20 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         reward_dict = {}
 
         for reward_fn_args in self.generator_cfg.reward:
-            input_args = {
-                "final_message": final_message,
-                "messages": messages,
-                "instance": instance,
-            }
-
-            reward_fn = get_reward_function(reward_fn_args["fn"])
-
-            input_args = {
-                **input_args, 
-                **reward_fn_args.get("args", {})
+            try:
+                input_args = {
+                    "final_message": final_message,
+                    "messages": messages,
+                    "instance": instance,
                 }
 
-            try:
+                reward_fn = get_reward_function(reward_fn_args["fn"])
+
+                input_args = {
+                    **input_args, 
+                    **reward_fn_args.get("args", {})
+                    }
+
                 reward_outputs = reward_fn(**input_args)
                 if isinstance(reward_outputs, tuple):
                     reward_value, reward_items = reward_outputs
@@ -377,8 +377,6 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             with fs.open(filename_path, "w", auto_mkdir=True) as f:
                 json.dump(result_dict, f, indent=2) #, sort_keys=True, ensure_ascii=False)
 
-        # return (response_ids, reward, stop_reason, loss_mask, initial_input_ids, None)
-        # return [rollout_list[-1], reward_dict, metrics_dict]
         return [rollout_list, reward_dict, metrics_dict]
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
