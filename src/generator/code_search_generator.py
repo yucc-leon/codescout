@@ -425,15 +425,6 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         loss_masks = sum([[output[3] for output in step_outputs] for step_outputs in all_outputs], [])
         prompt_token_ids = sum([[output[4] for output in step_outputs] for step_outputs in all_outputs], [])
 
-        # # Filter out the `None` entries, which means that trajectory generation failed
-        # responses = [output[0] for output in all_outputs if output[0] is not None]
-        # rewards = [output[1] for output in all_outputs if output[0] is not None]
-        # stop_reasons = [output[2] for output in all_outputs if output[0] is not None]
-        # loss_masks = [output[3] for output in all_outputs if output[0] is not None]
-        # prompt_token_ids = [
-        #     output[4] for output in all_outputs if output[0] is not None
-        # ]
-
         out_trajectory_ids = []
         is_last_step = []
         for i in range(len(all_outputs)):
