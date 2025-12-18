@@ -57,6 +57,7 @@ from openhands.sdk import (
 
 from src.prompts.prompt_builder import get_instruction
 from src.utils.instance import clone_instance
+from src.agent.agent import CustomAgent
 
 from src.rewards import get_reward_function
 
@@ -102,11 +103,12 @@ def init_and_run(
     final_message = ""
     messages = []
 
-    agent = Agent(
+    # agent = Agent(
+    agent = CustomAgent(
         llm=LLM(
             usage_id="agent",
             model=litellm_model_name,
-            base_url=f"http://localhost:8080/v1/",
+            base_url=litellm_base_url,
             api_key="sk-xxx",
             temperature=temperature,
             litellm_extra_body={
@@ -114,19 +116,18 @@ def init_and_run(
                 "include_stop_str_in_output": True,
             }
         ),
-        tools=get_planning_tools(),
-        # tools=[Tool(name=TerminalTool.name)],
-        # tools=get_default_tools(enable_browser=False),
+        # tools=get_planning_tools(),
+        tools=[Tool(name=TerminalTool.name)],
         security_analyzer=None,
+        system_prompt_filename=os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "system_prompt.j2")
     )
 
     conversation = Conversation(
         agent=agent,
-        max_iteration_per_run=15,
+        max_iteration_per_run=10,
         visualizer=None,
         workspace=str(working_dir),
     )
-    # prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "file_localization.j2")
     prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "file_module.j2")
     input_message = get_instruction(instance, prompt_path, str(working_dir))
     conversation.send_message(input_message)
@@ -173,13 +174,14 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name
         )
 
-        self.http_server_inference_engine_client_host = generator_cfg.get(
-            "http_server_inference_engine_client_host", "127.0.0.1"
+        self.http_endpoint_host = generator_cfg.get(
+            "http_endpoint_host", "127.0.0.1"
         )
-        self.http_server_inference_engine_client_port = generator_cfg.get(
-            "http_server_inference_engine_client_port", 8000
+        self.http_endpoint_port = generator_cfg.get(
+            "http_endpoint_port", 8000
         )
-        self.base_url = f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
+        self.base_url = f"http://{self.http_endpoint_host}:{self.http_endpoint_port}/v1/"
+        logger.info(f"Using CodeSearchGenerator with model {model_name} at {self.base_url}")
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = model_name
@@ -206,7 +208,6 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         instance = env_extras
         error = None
         try:
-
             messages, final_message, additional_attr = await init_and_run.remote(
                 instance,
                 self.litellm_model_name,
