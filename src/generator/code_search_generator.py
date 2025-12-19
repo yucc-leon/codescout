@@ -103,6 +103,8 @@ def init_and_run(
     final_message = ""
     messages = []
 
+    logger.info(f"Using tools: {generator_cfg.tools}")
+
     # agent = Agent(
     agent = CustomAgent(
         llm=LLM(
@@ -280,7 +282,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         if final_message == "":
             reward = -10.0
 
-        print(f"Reward details: {reward_dict}, Total reward: {reward}")
+        logger.info(f"Reward details: {reward_dict}, Total reward: {reward}")
 
         # Compute Trajectory Metrics
         efficiency_metrics = compute_all_efficiency_metrics(
