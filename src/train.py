@@ -6,6 +6,7 @@ import ray
 
 import asyncio
 
+from src.tools import tool_exists
 from src.generator.code_search_generator import CodeSearchGenerator
 from src.async_trainer import CustomFullyAsyncRayPPOTrainer as FullyAsyncRayPPOTrainer
 # from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
@@ -88,6 +89,11 @@ def main(cfg: DictConfig) -> None:
             cfg.generator.tools = [
                 "terminal",
             ]
+
+    # Check if the tool exists in the registry
+    for tool in cfg.generator.tools:
+        if not tool_exists(tool):
+            raise ValueError(f"Tool {tool} does not exist in the registry")
     
     # Set default prompts if not specified
     if not hasattr(cfg.generator, "prompts"):
