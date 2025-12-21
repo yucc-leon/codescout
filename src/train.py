@@ -77,6 +77,9 @@ def main(cfg: DictConfig) -> None:
         with open_dict(cfg):
             cfg.generator.reward = exp_cfg.reward
             cfg.generator.tools = exp_cfg.tools
+            # Parse prompts if they exist in the exp config
+            if hasattr(exp_cfg, "prompts"):
+                cfg.generator.prompts = exp_cfg.prompts
     else:
         with open_dict(cfg):
             cfg.generator.reward = [
@@ -86,9 +89,14 @@ def main(cfg: DictConfig) -> None:
                 "terminal",
             ]
     
-    print(f"cfg.generator.reward: {cfg.generator.reward}")
-    print(f"cfg.generator.tools: {cfg.generator.tools}")
-
+    # Set default prompts if not specified
+    if not hasattr(cfg.generator, "prompts"):
+        with open_dict(cfg):
+            cfg.generator.prompts = {
+                "system_prompt": "templates/system_prompt.j2",
+                "user_prompt": "templates/file_module_parallel_tools.j2"
+            }
+    
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

@@ -107,6 +107,11 @@ def init_and_run(
         Tool(name=tool_name) for tool_name in generator_cfg.tools
     ]
 
+    # Get prompt paths from config (path-independent)
+    prompts_base_dir = os.path.join(os.path.dirname(__file__), "..", "prompts")
+    system_prompt_path = os.path.join(prompts_base_dir, generator_cfg.prompts.system_prompt)
+    user_prompt_path = os.path.join(prompts_base_dir, generator_cfg.prompts.user_prompt)
+
     agent = CustomAgent(
         llm=LLM(
             usage_id="agent",
@@ -121,7 +126,7 @@ def init_and_run(
         ),
         tools=tools,
         security_analyzer=None,
-        system_prompt_filename=os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "system_prompt.j2")
+        system_prompt_filename=system_prompt_path
     )
 
     conversation = Conversation(
@@ -130,9 +135,7 @@ def init_and_run(
         visualizer=None,
         workspace=str(working_dir),
     )
-    # prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "file_localization.j2")
-    prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "file_module_parallel_tools.j2")
-    input_message = get_instruction(instance, prompt_path, str(working_dir))
+    input_message = get_instruction(instance, user_prompt_path, str(working_dir))
     conversation.send_message(input_message)
 
     logger.info("Conversation Starting")
