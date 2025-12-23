@@ -44,7 +44,7 @@ from openhands.workspace import DockerWorkspace
 from openhands.tools.preset.default import get_default_tools
 from openhands.tools.preset.planning import get_planning_tools
 from openhands.tools.terminal import TerminalTool
-from openhands.sdk.tool import Tool
+from openhands.sdk.tool import Tool, register_tool
 from openhands.sdk import (
     Agent,
     LLM,
@@ -60,6 +60,7 @@ from src.utils.instance import clone_instance
 from src.agent.agent import CustomAgent
 
 from src.rewards import get_reward_function
+from src.tools import TOOL_REGISTRY
 
 from src.metrics.efficiency_metrics import compute_all_efficiency_metrics
 from src.metrics.trajectory_metrics import compute_trajectory_metrics
@@ -103,7 +104,21 @@ def init_and_run(
     final_message = ""
     messages = []
 
-    # agent = Agent(
+    for tool_name in generator_cfg.tools:
+        if tool_name in TOOL_REGISTRY:
+            register_tool(tool_name, TOOL_REGISTRY[tool_name])
+        else:
+            raise ValueError(f"Tool {tool_name} does not exist in the registry")
+
+    tools = [
+        Tool(name=tool_name) for tool_name in generator_cfg.tools
+    ]
+
+    # Get prompt paths from config (path-independent)
+    prompts_base_dir = os.path.join(os.path.dirname(__file__), "..", "prompts")
+    system_prompt_path = os.path.join(prompts_base_dir, generator_cfg.prompts.system_prompt)
+    user_prompt_path = os.path.join(prompts_base_dir, generator_cfg.prompts.user_prompt)
+
     agent = CustomAgent(
         llm=LLM(
             usage_id="agent",
@@ -116,10 +131,9 @@ def init_and_run(
                 "include_stop_str_in_output": True,
             }
         ),
-        # tools=get_planning_tools(),
-        tools=[Tool(name=TerminalTool.name)],
+        tools=tools,
         security_analyzer=None,
-        system_prompt_filename=os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "system_prompt.j2")
+        system_prompt_filename=system_prompt_path
     )
 
     conversation = Conversation(
@@ -128,8 +142,7 @@ def init_and_run(
         visualizer=None,
         workspace=str(working_dir),
     )
-    prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "templates", "file_module.j2")
-    input_message = get_instruction(instance, prompt_path, str(working_dir))
+    input_message = get_instruction(instance, user_prompt_path, str(working_dir))
     conversation.send_message(input_message)
 
     logger.info("Conversation Starting")
@@ -279,7 +292,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         if final_message == "":
             reward = -10.0
 
-        print(f"Reward details: {reward_dict}, Total reward: {reward}")
+        logger.info(f"Reward details: {reward_dict}, Total reward: {reward}")
 
         # Compute Trajectory Metrics
         efficiency_metrics = compute_all_efficiency_metrics(
@@ -340,6 +353,8 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         else:
             use_gcs = False
             fs = fsspec.filesystem("file")
+            # Pre-create directory to avoid race conditions with parallel workers
+            os.makedirs(path, exist_ok=True)
         
         instance_id = env_extras["instance_id"]
 
