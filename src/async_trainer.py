@@ -1,6 +1,12 @@
+import os
+import pathlib
+import pickle
+import fsspec
+import gcsfs
 import numpy as np
 import torch
 
+from pathlib import Path
 from loguru import logger
 from typing import List
 
@@ -125,18 +131,18 @@ class CustomFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
         self.cfg.trainer.step_wise_training = False
         generator_output = self.postprocess_generator_output(generator_output, uids)
 
-        # Truncate prompt_token_ids to avoid OOM
-        max_prompt_len = self.cfg.trainer.max_prompt_length
-        if max_prompt_len == -1:
-            pass
-        else:
-            truncated_prompt_token_ids = []
-            for prompt_ids in generator_output["prompt_token_ids"]:
-                if len(prompt_ids) > max_prompt_len:
-                    truncated_prompt_token_ids.append(prompt_ids[-max_prompt_len:])
-                else:
-                    truncated_prompt_token_ids.append(prompt_ids)
-            generator_output["prompt_token_ids"] = truncated_prompt_token_ids
+        # # Truncate prompt_token_ids to avoid OOM
+        # max_prompt_len = self.cfg.trainer.max_prompt_length
+        # if max_prompt_len == -1:
+        #     pass
+        # else:
+        #     truncated_prompt_token_ids = []
+        #     for prompt_ids in generator_output["prompt_token_ids"]:
+        #         if len(prompt_ids) > max_prompt_len:
+        #             truncated_prompt_token_ids.append(prompt_ids[-max_prompt_len:])
+        #         else:
+        #             truncated_prompt_token_ids.append(prompt_ids)
+        #     generator_output["prompt_token_ids"] = truncated_prompt_token_ids
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -146,3 +152,19 @@ class CustomFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
         training_input = self.convert_to_training_input(generator_output, uids)
         self.cfg.trainer.step_wise_training = step_wise_training
         return training_input
+
+    def dump_data(self, data: TrainingInputBatch, file_name: str):
+        """
+        Dump data to pickle file
+        """
+        path = os.path.join(self.cfg.trainer.export_path, "dumped_data", f"{file_name}.pkl")
+        # Check if traj_dir is a gcs path
+        if path.startswith("gs://"):
+            fs = gcsfs.GCSFileSystem()
+        else:
+            os.makedirs(pathlib.Path(path).parent, exist_ok=True)
+            fs = fsspec.filesystem("file")
+
+        # Save pkl file
+        with fs.open(path, "wb") as f:
+            pickle.dump(data, f)
