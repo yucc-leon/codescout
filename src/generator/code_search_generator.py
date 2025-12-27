@@ -212,6 +212,9 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             )
 
         self.step_wise = step_wise
+        self.max_train_length = generator_cfg.get(
+            "max_train_length", 16384
+        )
 
     async def code_search_loop(
         self,
@@ -338,11 +341,16 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                     )
             else:
 
+                # Max Sequence for training
+                max_train_len = self.max_train_length
+
                 current_prompt_ids = token_messages[0]["prompt_token_ids"]
                 ending_prompt_ids = token_messages[-1]["prompt_token_ids"]
                 ending_response_ids = token_messages[-1]["response_token_ids"]
                 current_response_ids = ending_prompt_ids + ending_response_ids
                 current_response_ids = current_response_ids[len(current_prompt_ids):]
+
+                max_response_len = max_train_len - len(current_prompt_ids)
 
                 # make mask of 0 for everything inside <|im_start|> 
                 # and assistant and 1 elsewhere 
@@ -362,6 +370,12 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                             mask.append(0)
                         else:
                             mask.append(1)
+
+                # mask zero out everything beyond max_response_len
+                # Don't truncate the response, just mask out the loss
+                if len(current_response_ids) > max_response_len:
+                    for i in range(max_response_len, len(current_response_ids)):
+                        mask[i] = 0
 
                 rollout_list.append(
                     (
