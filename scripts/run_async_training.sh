@@ -89,8 +89,8 @@ uv run --isolated -m src.train \
   trainer.micro_train_batch_size_per_gpu=${MICRO_BATCH_SIZE} \
   trainer.dump_data_batch=true \
   trainer.export_path="${CKPT_PATH}exported_model/" \
-  trainer.hf_save_interval=20 \
-  trainer.ckpt_interval=20 \
+  trainer.hf_save_interval=10 \
+  trainer.ckpt_interval=25 \
   trainer.use_sample_packing=false \
   trainer.max_prompt_length=32768 \
   generator.sampling_params.max_generate_length=${MAX_LENGTH} \
