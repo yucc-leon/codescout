@@ -91,7 +91,7 @@ def init_and_run(
 
     instance_id = instance["instance_id"]
     repo_name = instance["repo"]
-    commit_id = instance["base_commit"]
+    commit_id = instance.get("base_commit", None)
     if "use_patch" in instance and instance["use_patch"]:
         patch = instance["patch"]
     else:
@@ -123,7 +123,7 @@ def init_and_run(
     tools = [
         Tool(name=GlobTool.name),
         Tool(name=GrepTool.name),
-        Tool(name=TerminalTool.name),
+        # Tool(name=TerminalTool.name),
     ]
 
     # Get prompt paths from config (path-independent)
@@ -287,7 +287,8 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                     "instance": instance,
                 }
 
-                reward_fn = get_reward_function(reward_fn_args["fn"])
+                reward_weight = reward_fn_args.get("weight", 1.0)
+                reward_fn = get_reward_function(reward_fn_args["fn"]) * reward_weight
 
                 input_args = {
                     **input_args, 
