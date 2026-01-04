@@ -140,8 +140,12 @@ def init_and_run(
             temperature=temperature,
             litellm_extra_body={
                 "return_token_ids": True,
-                "include_stop_str_in_output": True,
-            }
+                "include_stop_str_in_output": False,
+                "add_generation_prompt": True,
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                    }
+            },
         ),
         tools=tools,
         security_analyzer=None,
@@ -163,7 +167,10 @@ def init_and_run(
     start_time = time.time()
     start_timestamp = datetime.now().isoformat()
 
-    conversation.run()
+    try:
+        conversation.run()
+    except Exception as e:
+        logger.error(f"Error during conversation run: {e}", exc_info=True)
 
     messages = list(map(lambda event: event.model_dump(), conversation.state.events))
     final_message = get_agent_final_response(conversation.state.events)
@@ -214,10 +221,10 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         # self.litellm_model_name = "openai/" + self.model_name
         self.litellm_model_name = "litellm_proxy/" + self.model_name
 
-        if self.generator_cfg.chat_template.name_or_path is not None:
-            raise NotImplementedError(
-                "OpenhandsGenerator doesn't support custom chat template"
-            )
+        # if self.generator_cfg.chat_template.name_or_path is not None:
+        #     raise NotImplementedError(
+        #         "OpenhandsGenerator doesn't support custom chat template"
+        #     )
 
         self.step_wise = step_wise
         self.max_train_length = generator_cfg.get(
@@ -322,19 +329,16 @@ class CodeSearchGenerator(SkyRLGymGenerator):
 
         token_messages = [msg for msg in messages if msg["kind"] == "TokenEvent"]
         rollout_list = []
-        gamma = 0.9
-        num_steps = len(token_messages)
         if len(token_messages) > 0:
             if self.step_wise:
                 for idx, message in enumerate(token_messages):
                     current_prompt_ids = message["prompt_token_ids"]
                     current_response_ids = message["response_token_ids"]
-                    step_reward = reward * gamma**(num_steps - idx - 1)
 
                     rollout_list.append(
                         (
                             current_response_ids,
-                            step_reward,
+                            reward,
                             "complete",
                             [1]*len(current_response_ids),
                             current_prompt_ids,
@@ -437,7 +441,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             # get everything between ```` with regex
             raw_final_message = final_message
             matches = re.findall(r"```(.*?)```", final_message, re.DOTALL)
-            parsed_final_message = matches[0] if matches else final_message
+            parsed_final_message = matches[-1] if matches else final_message
 
             result_dict = {
                 "instance_id": instance_id,
