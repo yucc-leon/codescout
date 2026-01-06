@@ -287,20 +287,21 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                     "instance": instance,
                 }
 
-                reward_weight = reward_fn_args.get("weight", 1.0)
-                reward_fn = get_reward_function(reward_fn_args["fn"]) * reward_weight
+                reward_fn = get_reward_function(reward_fn_args["fn"])
 
                 input_args = {
                     **input_args, 
                     **reward_fn_args.get("args", {})
                     }
 
+                reward_weight = reward_fn_args.get("weight", 1.0)
                 reward_outputs = reward_fn(**input_args)
                 if isinstance(reward_outputs, tuple):
                     reward_value, reward_items = reward_outputs
                 else:
                     reward_value = reward_outputs
                     reward_items = {reward_fn_args["fn"]: reward_value}
+                reward_value = reward_value * reward_weight
             except Exception as e:
                 logger.error(f"Error in computing reward {reward_fn_args['fn']}: {e}", exc_info=True)
                 reward_value = 0.0
@@ -360,22 +361,32 @@ class CodeSearchGenerator(SkyRLGymGenerator):
 
                 max_response_len = max_train_len - len(current_prompt_ids)
 
+                buffer_succeed = 5  # buffer tokens after assistant tag
+                buffer_precede = 1  # buffer tokens before im_start tag
                 # make mask of 0 for everything inside <|im_start|> 
                 # and assistant and 1 elsewhere 
                 start_token_id = self.tokenizer.convert_tokens_to_ids("<|im_start|>")
                 end_token_id = self.tokenizer.convert_tokens_to_ids("assistant")
                 mask = []
                 inside = False
+                buffer = 0
                 for token_id in current_response_ids:
                     if token_id == start_token_id:
                         inside = True
+                        for _ in range(buffer_precede):
+                            mask.pop()
+                        mask.extend([0] * buffer_precede)
                         mask.append(0)
                     elif token_id == end_token_id:
                         inside = False
                         mask.append(0)
+                        buffer = buffer_succeed
                     else:
                         if inside:
                             mask.append(0)
+                        elif buffer:
+                            mask.append(0)
+                            buffer -= 1
                         else:
                             mask.append(1)
 
