@@ -46,6 +46,7 @@ from openhands.tools.preset.planning import get_planning_tools
 from openhands.tools.glob import GlobTool
 from openhands.tools.grep import GrepTool
 from openhands.tools.terminal import TerminalTool
+from openhands.tools.gemini import ReadFileTool, ListDirectoryTool
 from openhands.sdk.tool import Tool, register_tool
 from openhands.sdk import (
     Agent,
@@ -121,9 +122,11 @@ def init_and_run(
     # ]
 
     tools = [
-        Tool(name=GlobTool.name),
-        Tool(name=GrepTool.name),
-        # Tool(name=TerminalTool.name),
+        # Tool(name=GlobTool.name),
+        # Tool(name=GrepTool.name),
+        Tool(name=TerminalTool.name),
+        # Tool(name=ReadFileTool.name),
+        # Tool(name=ListDirectoryTool.name),
     ]
 
     # Get prompt paths from config (path-independent)
@@ -454,6 +457,14 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             raw_final_message = final_message
             matches = re.findall(r"```(.*?)```", final_message, re.DOTALL)
             parsed_final_message = matches[-1] if matches else final_message
+
+            # Force messages to be JSON serializable
+            for msg in messages:
+                for key, value in msg.items():
+                    try:
+                        json.dumps(value)
+                    except (TypeError, OverflowError):
+                        msg[key] = str(value)
 
             result_dict = {
                 "instance_id": instance_id,

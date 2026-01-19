@@ -9,6 +9,8 @@ reward:
       entity_level_weight: 0.25
   - fn: format_reward
   - fn: tool_use_reward
+    args:
+      penalize: true
 
 tools:
   - glob

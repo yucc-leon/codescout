@@ -11,6 +11,7 @@ def main():
     parser.add_argument("--dataset", default="SWE-Gym/SWE-Gym", help="Input dataset path")
     parser.add_argument("--split", default="train", help="Dataset split to use")
     parser.add_argument("--output", required=True, help="Output file path for processed dataset")
+    parser.add_argument("--use_patch", action="store_true", help="Whether to use patches to extract target functions")
     args = parser.parse_args()
 
     # Load and process dataset
@@ -27,16 +28,10 @@ def main():
         lambda row: [{"role": "user", "content": row["problem_statement"]}], axis=1
     )
 
-    if "base_commit" not in dataset.columns:
-        dataset["base_commit"] = dataset["repo"].apply(
-            lambda x: x.split(".")[-1]
-        )
-
-        dataset["repo"] = dataset["repo"].apply(
-            lambda x: x.split("/")[-1].split(".")[0].replace("__", "/")
-        )
-
+    if args.use_patch:
         dataset["use_patch"] = True
+    else:
+        dataset["use_patch"] = False
 
     # Drop "PASS_TO_PASS" and "FAIL_TO_PASS" columns
     try:

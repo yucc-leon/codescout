@@ -70,6 +70,13 @@ def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
 
+    # cfg.trainer.policy.deepspeed_config.zero_optimization.offload_param.device = "cpu"
+    # cfg.trainer.policy.deepspeed_config.zero_optimization.offload_optimizer.device = "cpu"
+    # cfg.trainer.policy.deepspeed_config.zero_optimization.zero_hpz_partition_size = 8
+
+    print("cfg.trainer.policy.deepspeed_config")
+    print(cfg.trainer.policy.deepspeed_config)
+
     # check cfg.generator.exp_config if it exists or not
     if hasattr(cfg.generator, "exp_config"):
         # Open yaml file and print its contents

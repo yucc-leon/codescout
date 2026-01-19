@@ -1,5 +1,17 @@
 #!/bin/bash
-
+#SBATCH --partition=flame
+#SBATCH --qos=flame-16gpu_qos
+#SBATCH --account=gneubig
+#SBATCH --job-name=cso
+#SBATCH --output=../logs/%j.out
+#SBATCH --error=../logs/%j.out
+#SBATCH --gres=gpu:8
+#SBATCH --nodes=1
+#SBATCH --time=4-00:00:00
+#SBATCH --mem=1500G
+#SBATCH --cpus-per-task=64
+#SBATCH --ntasks-per-node=1
+#SBATCH --exclude=orchard-flame-16
 
 # export REWARD=file_loc
 # sbatch scripts/run_async_training.sh \
@@ -10,12 +22,13 @@
 
 . .env
 
-while getopts ":m:n:d:s:o:i:t:b:c:r:w:" opt; do
+while getopts ":m:n:d:s:l:o:i:t:b:c:r:w:" opt; do
   case ${opt} in
     m ) MODEL=$OPTARG;;
     n ) N_ROLLOUTS=$OPTARG;;
     d ) DATA_PATH=$OPTARG;;
     s ) CKPT_PATH=$OPTARG;;
+    l ) LCAL_PATH=$OPTARG;;
     o ) OTHER_OPTION=$OPTARG;;
     i ) NUM_INFERENCE_ENGINES=$OPTARG;;
     t ) NUM_TRAINING_ENGINES=$OPTARG;;
@@ -39,6 +52,8 @@ set -x
 
 DATA_PATH="${DATA_PATH:-data/swe_smith}"
 CKPT_PATH="${CKPT_PATH:-$(pwd)/ckpts/${MODEL_ALIAS}}"
+# If LCAL_PATH is not set, use CKPT_PATH
+LCAL_PATH="${LCAL_PATH:-$CKPT_PATH}"
 mkdir -p $CKPT_PATH
 
 HALF_NUM_GPUS=$((NUM_GPUS / 2))
@@ -77,11 +92,13 @@ uv run --isolated -m src.train \
   +generator.engine_init_kwargs.rope_scaling.rope_type=yarn \
   +generator.engine_init_kwargs.rope_scaling.factor=2.0 \
   +generator.engine_init_kwargs.rope_scaling.original_max_position_embeddings=32768 \
-  +generator.engine_init_kwargs.max_model_len=48_000 \
-  trainer.epochs=5 \
-  trainer.eval_batch_size=100 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=1000 \
+  +generator.engine_init_kwargs.max_model_len=50_000 \
+  +generator.engine_init_kwargs.disable_cascade_attn=true \
+  generator.eval_n_samples_per_prompt=1 \
+  trainer.epochs=10 \
+  trainer.eval_batch_size=32 \
+  trainer.eval_before_train=true \
+  trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=${BATCH_SIZE} \
   trainer.policy_mini_batch_size=${BATCH_SIZE} \
@@ -90,17 +107,21 @@ uv run --isolated -m src.train \
   trainer.dump_data_batch=true \
   trainer.export_path="${CKPT_PATH}exported_model/" \
   trainer.hf_save_interval=10 \
-  trainer.ckpt_interval=25 \
+  trainer.ckpt_interval=100 \
   trainer.use_sample_packing=false \
   trainer.max_prompt_length=32768 \
   generator.sampling_params.max_generate_length=${MAX_LENGTH} \
   generator.sampling_params.temperature=1.0 \
   generator.max_input_length=32768 \
   generator.max_num_batched_tokens=131072 \
-  generator.max_turns=4 \
+  generator.max_turns=6 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=False \
   trainer.algorithm.use_kl_in_reward=False \
+  trainer.algorithm.policy_loss_type="gspo" \
+  trainer.algorithm.eps_clip_low=0.2 \
+  trainer.algorithm.eps_clip_high=0.28 \
+  trainer.algorithm.loss_reduction="sequence_mean" \
   generator.backend=vllm \
   generator.run_engines_locally=True \
   generator.enable_http_endpoint=True \
@@ -111,13 +132,12 @@ uv run --isolated -m src.train \
   generator.batched=false \
   generator.n_samples_per_prompt=${N_ROLLOUTS} \
   generator.gpu_memory_utilization=0.8 \
-  generator.enforce_eager=true \
+  generator.enforce_eager=false \
   trainer.step_wise_training=${STEP_WISE} \
   trainer.logger="wandb" \
   trainer.project_name="code_search" \
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$CKPT_PATH" \
+  trainer.ckpt_path="$LCAL_PATH" \
   trainer.max_ckpts_to_keep=-1 \
   $OTHER_OPTION
-  # +generator.engine_init_kwargs.reasoning_parser=qwen3 \

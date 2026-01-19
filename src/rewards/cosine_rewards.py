@@ -20,6 +20,8 @@ def cosine_reward(
     ideal_avg_tool_calls=5,
     max_length=16384,
     multilevel=True,
+    max_reward=5.0,
+    min_reward=-5.0,
     **kwargs
     ):
 
@@ -48,8 +50,8 @@ def cosine_reward(
     tool_messages = [msg for msg in messages if msg["kind"] == "ActionEvent"]
     
     # Don't count the last turn which is the 
-    # final answer generation and does not involve tool use
-    num_turns = min(1, len(token_messages)-1)
+    # final answer generation which can involve 1 tool or none
+    num_turns = max(1, len(token_messages) - 1)
     num_tool_calls = len(tool_messages)
     avg_tool_calls_per_turn = num_tool_calls / num_turns if num_turns > 0 else 0
 
@@ -60,9 +62,9 @@ def cosine_reward(
         if num_turns > max_turns:
             cosine_turn_reward = 0
         elif loc_reward >= loc_threshold:
-            cosine_turn_reward = _cos_fn(num_turns, max_turns, 0.0, 5.0)
+            cosine_turn_reward = _cos_fn(num_turns, max_turns, 0.0, max_reward)
         else:
-            cosine_turn_reward = _cos_fn(num_turns, max_turns, 0.0, -5.0)
+            cosine_turn_reward = _cos_fn(num_turns, max_turns, 0.0, min_reward)
         reward_dict["turn_cosine_reward"] = cosine_turn_reward
 
         reward += cosine_turn_reward
@@ -80,9 +82,9 @@ def cosine_reward(
         if current_length > max_length:
             cosine_length_reward = 0
         elif loc_reward >= loc_threshold:
-            cosine_length_reward = _cos_fn(current_length, max_length, 0.0, 5.0)
+            cosine_length_reward = _cos_fn(current_length, max_length, 0.0, max_reward)
         else:
-            cosine_length_reward = _cos_fn(current_length, max_length, 0.0, -5.0)
+            cosine_length_reward = _cos_fn(current_length, max_length, 0.0, min_reward)
         reward_dict["length_cosine_reward"] = cosine_length_reward
 
         reward += cosine_length_reward
@@ -96,12 +98,12 @@ def cosine_reward(
             # Anything more or less than the max score
             if avg_tool_calls_per_turn >= ideal_avg_tool_calls:
                 avg_tool_calls_per_turn -= ideal_avg_tool_calls
-                cosine_tool_reward = _cos_fn(avg_tool_calls_per_turn, ideal_avg_tool_calls, 1.0, 5.0)
+                cosine_tool_reward = _cos_fn(avg_tool_calls_per_turn, ideal_avg_tool_calls, 1.0, max_reward)
             else:
-                cosine_tool_reward = _cos_fn(avg_tool_calls_per_turn, ideal_avg_tool_calls, 5.0, 1.0)
+                cosine_tool_reward = _cos_fn(avg_tool_calls_per_turn, ideal_avg_tool_calls, max_reward, 1.0)
         else:
             # If wrong, encourage to do more calls
-            cosine_tool_reward = _cos_fn(avg_tool_calls_per_turn, 10, 0.0, -5.0)
+            cosine_tool_reward = _cos_fn(avg_tool_calls_per_turn, max_avg_tool_calls, 0.0, min_reward)
         reward_dict["tool_cosine_reward"] = cosine_tool_reward
 
         reward += cosine_tool_reward

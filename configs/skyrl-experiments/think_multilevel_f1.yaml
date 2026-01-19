@@ -13,4 +13,4 @@ tools:
 
 prompts:
   system_prompt: "templates/system_prompt_short.j2"
-  user_prompt: "templates/file_module.j2"
+  user_prompt: "templates/file_module_think.j2"
