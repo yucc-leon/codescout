@@ -119,8 +119,8 @@ uv run --isolated -m src.train \
   trainer.algorithm.use_kl_loss=False \
   trainer.algorithm.use_kl_in_reward=False \
   trainer.algorithm.policy_loss_type="gspo" \
-  trainer.algorithm.eps_clip_low=0.2 \
-  trainer.algorithm.eps_clip_high=0.28 \
+  trainer.algorithm.eps_clip_low=3e-4 \
+  trainer.algorithm.eps_clip_high=4e-4 \
   trainer.algorithm.loss_reduction="sequence_mean" \
   generator.backend=vllm \
   generator.run_engines_locally=True \
