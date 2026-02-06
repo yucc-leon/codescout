@@ -12,6 +12,9 @@ from typing import List
 
 from skyrl_train.utils import ppo_utils, trainer_utils
 
+from collections import defaultdict
+from typing import List, Union
+
 from skyrl_train.generators.utils import get_rollout_metrics
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.training_batch import TrainingInputBatch
@@ -152,6 +155,76 @@ class CustomFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
         training_input = self.convert_to_training_input(generator_output, uids)
         self.cfg.trainer.step_wise_training = step_wise_training
         return training_input
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+        """
+        Override to replace skyrl's pass@n (reward > 0) with exact_match@n
+        (all correctness components perfect, i.e. reward >= max correctness weight).
+
+        pass@n is misleading for F1-based rewards where any partial match yields
+        reward > 0. exact_match requires the full localization reward to be at or
+        near its theoretical maximum.
+        """
+        generator_output_for_metrics = generator_output
+        uids_for_metrics = uids
+        if self.cfg.trainer.step_wise_training:
+            generator_output_for_metrics = defaultdict(list)
+            for key in generator_output:
+                if isinstance(generator_output[key], list):
+                    generator_output_for_metrics[key] = [
+                        generator_output[key][i]
+                        for i in range(len(generator_output[key]))
+                        if generator_output["is_last_step"][i]
+                    ]
+            uids_for_metrics = [
+                uid for uid, is_last in zip(uids, generator_output["is_last_step"]) if is_last
+            ]
+
+        # --- Compute reward stats (same as parent) ---
+        rewards: Union[List[float], List[List[float]]] = generator_output_for_metrics["rewards"]
+        uid_to_trajectory_rewards = defaultdict(list)
+        if rewards and isinstance(rewards[0], list):
+            mean_raw_reward = float(np.mean([sum(r) for r in rewards]))
+            for i, r in enumerate(rewards):
+                uid_to_trajectory_rewards[uids_for_metrics[i]].append(r[-1] if r else 0.0)
+        else:
+            mean_raw_reward = float(np.mean(rewards)) if rewards else 0.0
+            for i, r in enumerate(rewards):
+                uid_to_trajectory_rewards[uids_for_metrics[i]].append(r)
+
+        n_samples = self.cfg.generator.n_samples_per_prompt
+
+        # exact_match: reward >= threshold (default 1.0 - eps, i.e. perfect F1 on all levels)
+        exact_match_threshold = self.cfg.generator.get("exact_match_threshold", 1.0 - 1e-6)
+        exact_match_at_n = sum(
+            1 for v in uid_to_trajectory_rewards.values()
+            if any(r >= exact_match_threshold for r in v)
+        ) / max(len(uid_to_trajectory_rewards), 1)
+
+        reward_metrics = {
+            f"reward/exact_match_at_{n_samples}": exact_match_at_n,
+            "reward/avg_raw_reward": mean_raw_reward,
+        }
+        self.all_metrics.update(reward_metrics)
+        logger.info(
+            f"reward/exact_match_at_{n_samples}: {exact_match_at_n}, "
+            f"reward/avg_raw_reward: {mean_raw_reward}"
+        )
+
+        # --- Per-token reward conversion (same as parent) ---
+        rewards_full: Union[List[float], List[List[float]]] = generator_output["rewards"]
+        responses: List[List[int]] = generator_output["response_ids"]
+        per_token_rewards: List[List[float]] = []
+        if rewards_full and isinstance(rewards_full[0], list):
+            per_token_rewards = rewards_full
+        else:
+            for reward, response in zip(rewards_full, responses):
+                per_token_reward = [0.0] * len(response)
+                per_token_reward[-1] = float(reward)
+                per_token_rewards.append(per_token_reward)
+
+        generator_output["rewards"] = per_token_rewards
+        return generator_output
+
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
         """
