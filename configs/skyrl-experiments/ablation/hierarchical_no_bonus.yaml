@@ -1,0 +1,23 @@
+# Ablation V2: Hierarchical (no tool_call_bonus)
+# 对比有无 tool_call_bonus
+name: "v2_hierarchical_no_bonus"
+description: "Hierarchical (no tool_call_bonus) + format_reward, fixed prompt"
+
+reward:
+  - fn: hierarchical_localization_reward
+    weight: 1.0
+    args:
+      config_name: "general"
+      tool_call_bonus: 0.0
+  - fn: format_reward
+    weight: 1.0
+    args:
+      penalize: false
+
+tools:
+  - terminal
+  - localization_finish
+
+prompts:
+  system_prompt: "templates/system_prompt_tool_only.j2"
+  user_prompt: "templates/file_module.j2"

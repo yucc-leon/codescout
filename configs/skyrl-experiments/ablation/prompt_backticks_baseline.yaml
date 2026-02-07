@@ -1,0 +1,23 @@
+# Ablation V2: 旧 prompt (有冲突)
+# 用于对比验证 prompt 修复的必要性
+name: "v2_prompt_old"
+description: "Old prompt with backticks conflict - expected to fail for 4B"
+
+reward:
+  - fn: multilevel_localization_f1_reward
+    weight: 1.0
+    args:
+      beta: 0.5
+  - fn: format_reward
+    weight: 1.0
+    args:
+      penalize: false
+
+tools:
+  - terminal
+  - localization_finish
+
+prompts:
+  # 旧 prompt 同时告诉模型用 backticks 和 tool，导致 4B 选择 backticks
+  system_prompt: "templates/system_prompt.j2"
+  user_prompt: "templates/file_module.j2"

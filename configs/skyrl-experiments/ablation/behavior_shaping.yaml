@@ -1,0 +1,35 @@
+# Ablation Step 5: Behavior Shaping (instruction-following reward + aligned prompt)
+# 在最佳精度配置基础上叠加行为塑造 reward + 对齐的 strict prompt
+# 预期: exact_match 不降，turn 超限率和并行违规率下降
+#
+# 关键设计: prompt 和 reward 语义对齐
+#   - prompt 明确写了 turn 限制、并行限制、必须调 finish、高效完成
+#   - reward 对这 4 条指令的遵守/违反给予奖惩
+#
+# 使用方式: 复制最佳精度配置的 reward 列表，在末尾追加 behavior_shaping_reward
+# 下面以 multilevel_f05 + format_reward 为例（根据 step1-4 结果替换）
+name: "behavior_shaping"
+description: "Best config + behavior shaping reward + strict prompt"
+
+reward:
+  - fn: multilevel_localization_f1_reward
+    weight: 1.0
+    args:
+      beta: 0.5
+  - fn: format_reward
+    weight: 1.0
+    args:
+      penalize: false
+  - fn: behavior_shaping_reward
+    weight: 1.0
+    args:
+      max_turns: 4
+      max_parallel_calls: 5
+
+tools:
+  - terminal
+  - localization_finish
+
+prompts:
+  system_prompt: "templates/system_prompt_tool_only_strict.j2"
+  user_prompt: "templates/file_module.j2"

@@ -368,7 +368,8 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                     "final_message": final_message,
                     "messages": messages,
                     "instance": instance,
-                    "structured_locations": structured_locations
+                    "structured_locations": structured_locations,
+                    "correctness_reward": reward,  # accumulated reward so far (for gating)
                 }
 
                 reward_fn = get_reward_function(reward_fn_args["fn"])
@@ -410,6 +411,16 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             **efficiency_metrics,
             **trajectory_metrics
         }
+
+        # exact_match: 三层 F1 全部满分 (file, module, entity 各 == 1.0)
+        file_r = reward_dict.get("file_reward", 0.0)
+        module_r = reward_dict.get("module_reward", 0.0)
+        entity_r = reward_dict.get("entity_reward", 0.0)
+        metrics_dict["is_exact_match"] = 1.0 if (
+            abs(file_r - 1.0) < 1e-6
+            and abs(module_r - 1.0) < 1e-6
+            and abs(entity_r - 1.0) < 1e-6
+        ) else 0.0
 
         print(f"Total reward: {reward}\nReward details: {reward_dict}\nTrajectory metrics: {metrics_dict}")
 

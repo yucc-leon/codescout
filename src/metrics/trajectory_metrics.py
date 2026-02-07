@@ -15,7 +15,7 @@ def compute_trajectory_metrics(messages: List[Dict[str, Any]]) -> Dict[str, Any]
             - num_tool_calls_per_turn: Average tool calls per turn
             - tool_calls_by_turn: List of tool call counts for each turn
     """
-    if messages == []:
+    if not messages:
         return {
             "num_turns": 0,
             "num_tool_calls": 0,

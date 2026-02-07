@@ -1,0 +1,18 @@
+# Ablation V2: Multilevel F0.5 without format_reward
+# 对比有无 format_reward
+name: "v2_multilevel_no_format"
+description: "Multilevel F1 (beta=0.5) only, no format_reward, fixed prompt"
+
+reward:
+  - fn: multilevel_localization_f1_reward
+    weight: 1.0
+    args:
+      beta: 0.5
+
+tools:
+  - terminal
+  - localization_finish
+
+prompts:
+  system_prompt: "templates/system_prompt_tool_only.j2"
+  user_prompt: "templates/file_module.j2"

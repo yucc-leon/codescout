@@ -1,0 +1,22 @@
+# Ablation V2: Multilevel F0.5 (baseline)
+# 使用修复后的 prompt，确保模型调用 localization_finish tool
+name: "v2_multilevel_f05"
+description: "Multilevel F1 (beta=0.5) + format_reward, fixed prompt"
+
+reward:
+  - fn: multilevel_localization_f1_reward
+    weight: 1.0
+    args:
+      beta: 0.5
+  - fn: format_reward
+    weight: 1.0
+    args:
+      penalize: false
+
+tools:
+  - terminal
+  - localization_finish
+
+prompts:
+  system_prompt: "templates/system_prompt_tool_only.j2"
+  user_prompt: "templates/file_module.j2"

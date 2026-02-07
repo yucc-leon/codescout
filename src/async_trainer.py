@@ -8,7 +8,8 @@ import torch
 
 from pathlib import Path
 from loguru import logger
-from typing import List
+from typing import List, Union
+from collections import defaultdict
 
 from skyrl_train.utils import ppo_utils, trainer_utils
 
@@ -82,6 +83,12 @@ def patched_concatenate_generator_outputs(generator_outputs: List[GeneratorOutpu
     return result
 
 class CustomFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Track unique samples consumed across training
+        self._seen_trajectory_ids = set()
+        self._total_rollouts = 0
 
     def convert_generation_group_mini_batch_to_training_input(
         self, cur_generation_group_mini_batch: List[GeneratedOutputGroup]
@@ -125,6 +132,22 @@ class CustomFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
             }
         )
 
+        # Track unique samples consumed
+        trajectory_ids = generator_output["trajectory_ids"]
+        batch_unique_ids = set(trajectory_ids)
+        new_unique_ids = batch_unique_ids - self._seen_trajectory_ids
+        self._seen_trajectory_ids.update(batch_unique_ids)
+        self._total_rollouts += len(trajectory_ids)
+        
+        self.all_metrics.update(
+            {
+                "progress/unique_samples_consumed": len(self._seen_trajectory_ids),
+                "progress/total_rollouts": self._total_rollouts,
+                "progress/batch_unique_samples": len(batch_unique_ids),
+                "progress/batch_new_samples": len(new_unique_ids),
+            }
+        )
+
         # Convert rewards to per-token form and compute reward metrics before training conversion
         uids = generator_output["trajectory_ids"]
         step_wise_training = self.cfg.trainer.step_wise_training
@@ -152,6 +175,55 @@ class CustomFullyAsyncRayPPOTrainer(FullyAsyncRayPPOTrainer):
         training_input = self.convert_to_training_input(generator_output, uids)
         self.cfg.trainer.step_wise_training = step_wise_training
         return training_input
+
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+        """
+        Override skyrl's default postprocess to:
+        1. Remove misleading pass@n (reward > 0 is meaningless for F1-based rewards)
+        2. Log avg_raw_reward instead
+        
+        exact_match is computed per-trajectory in the generator (metrics/is_exact_match)
+        and auto-aggregated as batch mean — no need to duplicate here.
+        """
+        generator_output_for_metrics = generator_output
+        uids_for_metrics = uids
+        if self.cfg.trainer.step_wise_training:
+            generator_output_for_metrics = defaultdict(list)
+            for key in generator_output:
+                if isinstance(generator_output[key], list):
+                    generator_output_for_metrics[key] = [
+                        generator_output[key][i]
+                        for i in range(len(generator_output[key]))
+                        if generator_output["is_last_step"][i]
+                    ]
+            uids_for_metrics = [
+                uid for uid, is_last in zip(uids, generator_output["is_last_step"]) if is_last
+            ]
+
+        # --- Compute reward stats ---
+        rewards: Union[List[float], List[List[float]]] = generator_output_for_metrics["rewards"]
+        if rewards and isinstance(rewards[0], list):
+            mean_raw_reward = float(np.mean([sum(r) for r in rewards]))
+        else:
+            mean_raw_reward = float(np.mean(rewards)) if rewards else 0.0
+
+        self.all_metrics.update({"reward/avg_raw_reward": mean_raw_reward})
+        logger.info(f"reward/avg_raw_reward: {mean_raw_reward}")
+
+        # --- Per-token reward conversion (same as parent) ---
+        rewards_full: Union[List[float], List[List[float]]] = generator_output["rewards"]
+        responses: List[List[int]] = generator_output["response_ids"]
+        per_token_rewards: List[List[float]] = []
+        if rewards_full and isinstance(rewards_full[0], list):
+            per_token_rewards = rewards_full
+        else:
+            for reward, response in zip(rewards_full, responses):
+                per_token_reward = [0.0] * len(response)
+                per_token_reward[-1] = float(reward)
+                per_token_rewards.append(per_token_reward)
+
+        generator_output["rewards"] = per_token_rewards
+        return generator_output
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
         """

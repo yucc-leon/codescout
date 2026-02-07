@@ -1,7 +1,10 @@
 import hydra
+import os
 from omegaconf import DictConfig, OmegaConf, open_dict
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
+from skyrl_train.utils.tracking import Tracking
+from loguru import logger
 import ray
 
 import asyncio
@@ -10,6 +13,79 @@ import asyncio
 from src.generator.code_search_generator import CodeSearchGenerator
 from src.async_trainer import CustomFullyAsyncRayPPOTrainer as FullyAsyncRayPPOTrainer
 # from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+
+
+class WandbResumeTracking(Tracking):
+    """Extended Tracking class that supports wandb resume."""
+    
+    def __init__(self, project_name, experiment_name, backends, config, wandb_run_id=None):
+        # Don't call super().__init__ directly, we need to customize wandb init
+        if isinstance(backends, str):
+            backends = [backends]
+        for backend in backends:
+            assert backend in self.supported_backends, f"{backend} is not supported"
+
+        self.logger = {}
+
+        if "wandb" in backends:
+            import wandb
+            from omegaconf import OmegaConf
+
+            # Support resume with existing run id
+            if wandb_run_id:
+                logger.info(f"Resuming wandb run: {wandb_run_id}")
+                wandb.init(
+                    project=project_name, 
+                    name=experiment_name, 
+                    config=OmegaConf.to_container(config, resolve=True),
+                    id=wandb_run_id,
+                    resume="must"
+                )
+            else:
+                wandb.init(
+                    project=project_name, 
+                    name=experiment_name, 
+                    config=OmegaConf.to_container(config, resolve=True)
+                )
+            self.logger["wandb"] = wandb
+            
+            # Save run id for future resume
+            self._wandb_run_id = wandb.run.id
+            logger.info(f"Wandb run id: {self._wandb_run_id}")
+
+        # Initialize other backends using parent logic
+        if "mlflow" in backends:
+            from skyrl_train.utils.tracking import _MlflowLoggingAdapter
+            self.logger["mlflow"] = _MlflowLoggingAdapter(project_name, experiment_name, config)
+
+        if "swanlab" in backends:
+            import swanlab
+            SWANLAB_API_KEY = os.environ.get("SWANLAB_API_KEY", None)
+            SWANLAB_LOG_DIR = os.environ.get("SWANLAB_LOG_DIR", "swanlog")
+            SWANLAB_MODE = os.environ.get("SWANLAB_MODE", "cloud")
+            if SWANLAB_API_KEY:
+                swanlab.login(SWANLAB_API_KEY)
+            swanlab.init(
+                project=project_name,
+                experiment_name=experiment_name,
+                config=config,
+                logdir=SWANLAB_LOG_DIR,
+                mode=SWANLAB_MODE,
+            )
+            self.logger["swanlab"] = swanlab
+
+        if "tensorboard" in backends:
+            from skyrl_train.utils.tracking import _TensorboardAdapter
+            self.logger["tensorboard"] = _TensorboardAdapter()
+
+        if "console" in backends:
+            from skyrl_train.utils.tracking import ConsoleLogger
+            self.console_logger = ConsoleLogger()
+            self.logger["console"] = self.console_logger
+    
+    @property
+    def wandb_run_id(self):
+        return getattr(self, '_wandb_run_id', None)
 
 
 class CodeSearchPPOExp(BasePPOExp):
@@ -23,6 +99,28 @@ class CodeSearchPPOExp(BasePPOExp):
             step_wise=cfg.trainer.get("step_wise_training", False),
         )
         return generator
+    
+    def get_tracker(self):
+        """Initializes the tracker with wandb resume support."""
+        wandb_run_id = self.cfg.trainer.get("wandb_run_id", None)
+        
+        tracker = WandbResumeTracking(
+            project_name=self.cfg.trainer.project_name,
+            experiment_name=self.cfg.trainer.run_name,
+            backends=self.cfg.trainer.logger,
+            config=self.cfg,
+            wandb_run_id=wandb_run_id,
+        )
+        
+        # Save wandb run id to checkpoint directory for future resume
+        if tracker.wandb_run_id and self.cfg.trainer.ckpt_path:
+            wandb_id_file = os.path.join(self.cfg.trainer.ckpt_path, "wandb_run_id.txt")
+            os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
+            with open(wandb_id_file, "w") as f:
+                f.write(tracker.wandb_run_id)
+            logger.info(f"Saved wandb run id to {wandb_id_file}")
+        
+        return tracker
 
 class AsyncCodeSearchPPOExp(CodeSearchPPOExp):
     def get_trainer(
