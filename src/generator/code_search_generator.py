@@ -128,7 +128,7 @@ def init_and_run(
     
     # Avoid collisions in /tmp testbed directories
     uuid_str = str(uuid.uuid4())[:8]
-    workspace = Path(f"/tmp/testbed/{uuid_str}/")
+    workspace = Path(os.environ.get("TESTBED_ROOT", "/tmp/testbed")) / uuid_str
     status, working_dir = clone_instance(repo_name, commit_id, instance_id, workspace, patch)
 
     if training_phase == "eval":
@@ -290,7 +290,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         sampling_params: Dict[str, Any],
         trajectory_id: TrajectoryID,
         batch_metadata: BatchMetadata,
-    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]], Optional[Dict[str, Any]]]:
+    ) -> Tuple[List[int], float, str, List[int], List[int], Optional[List[int]], Optional[Dict[str, Any]], Optional[str]]:
         # NOTE (sumanthrh): Input `prompt` is not used here because mini-swe-agent uses a similar entry from the `instance` obj
         instance = env_extras
         error = None
@@ -416,7 +416,6 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                 current_response_ids = current_response_ids[len(current_prompt_ids):]
 
                 max_response_len = max_train_len - len(current_prompt_ids)
-
                 buffer_succeed = 5  # buffer tokens after assistant tag
                 if "Qwen3-4B-Instruct-2507" in self.model_name:
                     buffer_succeed = 1 #NOTE: 4B-Instruct doesn't have <think> tokens so only the subsequent \n needs masking.
@@ -448,19 +447,11 @@ class CodeSearchGenerator(SkyRLGymGenerator):
                             buffer -= 1
                         else:
                             mask.append(1)
-                    
                     # mark role switch is <|im_start|> is found
                     if token_id == start_token_id:
                         found_role_switch = True
                     else:
                         found_role_switch = False
-
-                # mask zero out everything beyond max_response_len
-                # Don't truncate the response, just mask out the loss
-                # if len(current_response_ids) > max_response_len:
-                #     for i in range(max_response_len, len(current_response_ids)):
-                #         mask[i] = 0
-                
                 # mask loss completely from trajectories that exhausted all steps without calling the custom finish tool
                 if trajectory_exhausted_steps:
                     logger.info("Trajectory exhausted all steps without calling the custom finish tool. Masking out loss from this rollout.")
@@ -508,9 +499,11 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         
         instance_id = env_extras["instance_id"]
 
+        trajectory_file_path = None
         if error is not None:
             filename = f"{instance_id}_{trajectory_id.repetition_id}.error"
             filename_path = path + filename
+            trajectory_file_path = filename_path
             print(f"Saving error to {filename_path}")
             if use_gcs == False:
                 os.makedirs(os.path.dirname(filename_path), exist_ok=True)
@@ -553,8 +546,9 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             print(f"Saving trajectory to {filename_path}")
             with fs.open(filename_path, "w", auto_mkdir=True) as f:
                 json.dump(result_dict, f, indent=2) #, sort_keys=True, ensure_ascii=False)
+            trajectory_file_path = filename_path
 
-        return [rollout_list, reward_dict, metrics_dict]
+        return [rollout_list, reward_dict, metrics_dict, trajectory_file_path]
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
@@ -595,6 +589,11 @@ class CodeSearchGenerator(SkyRLGymGenerator):
         all_outputs = [rollout[0] for rollout in collected_task_rollouts]
         rewards_dict = [rollout[1] for rollout in collected_task_rollouts]
         metrics_dict = [rollout[2] for rollout in collected_task_rollouts]
+        sample_trajectory_path = (
+            collected_task_rollouts[0][3]
+            if len(collected_task_rollouts) > 0 and len(collected_task_rollouts[0]) > 3
+            else None
+        )
 
         responses = sum([[output[0] for output in step_outputs] for step_outputs in all_outputs], [])
         rewards = sum([[output[1] for output in step_outputs] for step_outputs in all_outputs], [])
@@ -647,6 +646,7 @@ class CodeSearchGenerator(SkyRLGymGenerator):
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": None,
             "is_last_step": is_last_step,
+            "sample_trajectory_path": sample_trajectory_path,
             **tracked_metrics,
         }
 

@@ -1,12 +1,9 @@
 #!/bin/bash
 
-
-# export REWARD=file_loc
-# sbatch scripts/run_async_training.sh \
-#   -m Qwen/Qwen3-8B -n 8 -b 1 -i 4 -t 4 \
-#   -d data/swe_gym \
-#   -s /project/flame/lsutawik/cso/ckpts/qwen3-8b-8x8-${REWARD}/ \
-#   -o "+generator.reward=configs/rewards/${REWARD}.yaml"
+# Example usage:
+# bash scripts/run_async_training_4b.sh \
+#   -m Qwen/Qwen3-4B -n 8 -b 8 -i 4 -t 4 \
+#   -d data/swe_smith
 
 # . .env
 

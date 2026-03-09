@@ -1,0 +1,20 @@
+# Baseline 4B experiment config for soni/main.
+# Aligned with successful run: multilevel_localization_f1_reward + multiturn_reward (4 turns).
+# Successful config used tools: [terminal] only.
+name: "baseline_4b"
+description: "4B baseline: multilevel F1 + multiturn (4) + terminal"
+
+reward:
+  - fn: multilevel_localization_f1_reward
+    weight: 1.0
+  - fn: multiturn_reward
+    args:
+      minimal_turns: 4
+      maximal_turns: 4
+
+tools:
+  - terminal
+
+prompts:
+  system_prompt: "templates/system_prompt_custom_finish.j2"
+  user_prompt: "templates/file_module_custom_finish.j2"

@@ -5,7 +5,15 @@
 swebench_repos/
 uv.lock
 outputs/
+output/
 ckpts/
+data/
+wandb/
+logs/
+*.log
+nohup.out
+monitor_*.sh
+src.egg-info/
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
@@ -180,5 +188,3 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
-swebench_repos/
-setup.txt
