@@ -10,7 +10,7 @@
 </p>
 
 
-This repository contains the source code (training scripts, reward definitions, prompts) for the paper **CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents**
+This repository contains the source code for the paper **CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents**
 
 🏆 CodeScout achieves open-source SOTA code localization performance outperforming 8-18x larger base and post-trained LLMs and narrows the gap with frontier closed-source models.
 
