@@ -107,13 +107,13 @@ All our evaluation experiments have been performed using this [fork](https://git
 
 ```bibtex
 @misc{sutawika2026codescouteffectiverecipereinforcement,
-			title={CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents}, 
-			author={Lintang Sutawika and Aditya Bharat Soni and Bharath Sriraam R R and Apurva Gandhi and Taha Yassine and Sanidhya Vijayvargiya and Yuchen Li and Xuhui Zhou and Yilin Zhang and Leander Melroy Maben and Graham Neubig},
-			year={2026},
-			eprint={2603.17829},
-			archivePrefix={arXiv},
-			primaryClass={cs.SE},
-			url={https://arxiv.org/abs/2603.17829}, 
+	title={CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents}, 
+	author={Lintang Sutawika and Aditya Bharat Soni and Bharath Sriraam R R and Apurva Gandhi and Taha Yassine and Sanidhya Vijayvargiya and Yuchen Li and Xuhui Zhou and Yilin Zhang and Leander Melroy Maben and Graham Neubig},
+	year={2026},
+	eprint={2603.17829},
+	archivePrefix={arXiv},
+	primaryClass={cs.SE},
+	url={https://arxiv.org/abs/2603.17829}, 
 }
 ```
 
