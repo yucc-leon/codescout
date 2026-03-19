@@ -5,7 +5,7 @@
 		<img src="https://img.shields.io/badge/arXiv-2603.17829-b31b1b.svg" alt="arXiv" />
 	</a>
 	<a href="https://huggingface.co/collections/OpenHands/codescout">
-		<img src="https://img.shields.io/badge/🤗%20Models & Data-CodeScout%20Collection-yellow" alt="Hugging Face Collection" />
+		<img src="https://img.shields.io/badge/🤗%20Models%20%26%20Data-CodeScout%20Collection-yellow" alt="Hugging Face Collection" />
 	</a>
 </p>
 
@@ -14,16 +14,10 @@ This repository contains the source code (training scripts, reward definitions, 
 
 🏆 CodeScout achieves open-source SOTA code localization performance outperforming 8-18x larger base and post-trained LLMs and narrows the gap with frontier closed-source models.
 
-<table>
-	<tr>
-		<td align="center" width="50%">
-			<img src="./docs/verified_file_main.png" alt="CodeScout main figure (verified file-level)" width="100%" />
-		</td>
-		<td align="center" width="50%">
-			<img src="./docs/verified_function_main.png" alt="CodeScout main figure (verified function-level)" width="100%" />
-		</td>
-	</tr>
-</table>
+<div align="center">
+	<img src="./docs/verified_file_main.png" alt="CodeScout main figure (verified file-level)" width="49%" />
+	<img src="./docs/verified_function_main.png" alt="CodeScout main figure (verified function-level)" width="49%" />
+</div>
 
 ---
 
