@@ -1,0 +1,46 @@
+{
+  "os": "Linux-5.10.0-182.0.0.95.r1941_123.hce2.aarch64-aarch64-with-glibc2.35",
+  "python": "CPython 3.12.13",
+  "startedAt": "2026-03-26T02:47:08.399449Z",
+  "args": [
+    "--node-ip-address=192.168.179.245",
+    "--node-manager-port=39727",
+    "--object-store-name=/tmp/ray/ray/session_2026-03-26_10-45-05_187251_1194217/sockets/plasma_store",
+    "--raylet-name=/tmp/ray/ray/session_2026-03-26_10-45-05_187251_1194217/sockets/raylet",
+    "--redis-address=None",
+    "--metrics-agent-port=63721",
+    "--logging-rotate-bytes=536870912",
+    "--logging-rotate-backup-count=5",
+    "--runtime-env-agent-port=53335",
+    "--gcs-address=192.168.179.245:52985",
+    "--session-name=session_2026-03-26_10-45-05_187251_1194217",
+    "--temp-dir=/tmp/ray/ray",
+    "--webui=",
+    "--cluster-id=476d99874393f059f9cdcdaccc136604f32671abaca0e3bd4df8220b",
+    "--startup-token=130",
+    "--worker-launch-time-ms=1774493171132",
+    "--node-id=2cb9638043c73e8420ee043305204d96456748303199cc6c76e8e2ab",
+    "--runtime-env-hash=1442245078"
+  ],
+  "program": "/sharedata/liyuchen/miniforge3/envs/codescout-npu/lib/python3.12/site-packages/ray/_private/workers/default_worker.py",
+  "git": {
+    "remote": "https://github.com/yucc-leon/codescout.git",
+    "commit": "c7b767750e1b311e775c4b8fcf497ee02d6a5f77"
+  },
+  "email": "leonlee.working@gmail.com",
+  "root": "/sharedata/liyuchen/workspace/codescout",
+  "host": "npu-lych-rl-server-6-server-0",
+  "executable": "/sharedata/liyuchen/miniforge3/envs/codescout-npu/bin/python",
+  "cpu_count": 320,
+  "cpu_count_logical": 320,
+  "disk": {
+    "/": {
+      "total": "1055731638272",
+      "used": "129063780352"
+    }
+  },
+  "memory": {
+    "total": "2162447691776"
+  },
+  "writerId": "s0voztk6awy5gtelp4449gwbhqzek3vd"
+}
