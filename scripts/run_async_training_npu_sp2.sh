@@ -192,7 +192,7 @@ $PYTHON -m src.train_npu \
   trainer.placement.ref_num_gpus_per_node=${NUM_TRAINING_ENGINES} \
   trainer.placement.policy_num_nodes=1 \
   trainer.placement.ref_num_nodes=1 \
-  trainer.policy.sequence_parallel_size=1 \
+  trainer.policy.sequence_parallel_size=2 \
   generator.num_inference_engines=${NUM_INFERENCE_ENGINES} \
   generator.inference_engine_tensor_parallel_size=1 \
   +generator.traj_dir=${CKPT_PATH}/trajectories/ \
@@ -202,7 +202,8 @@ $PYTHON -m src.train_npu \
   +generator.prompts.system_prompt="templates/system_prompt_custom_finish.j2" \
   +generator.prompts.user_prompt="templates/file_module_custom_finish.j2" \
   +generator.engine_init_kwargs.disable_cascade_attn=true \
-  trainer.flash_attn=false \
+  trainer.flash_attn=true \
+  trainer.use_sample_packing=true \
   trainer.epochs=1 \
   trainer.eval_batch_size=100 \
   trainer.eval_before_train=false \
@@ -216,7 +217,6 @@ $PYTHON -m src.train_npu \
   trainer.export_path="${CKPT_PATH}/exported_model/" \
   trainer.hf_save_interval=50 \
   trainer.ckpt_interval=10 \
-  trainer.use_sample_packing=false \
   trainer.max_prompt_length=40960 \
   trainer.algorithm.policy_loss_type="gspo" \
   trainer.algorithm.eps_clip_low=0.0003 \

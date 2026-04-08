@@ -1,0 +1,1790 @@
+From 6e3ffa53d5f18b89fd9d3f106ab69fbbd4412b24 Mon Sep 17 00:00:00 2001
+From: liyuchen <liyuchen@example.com>
+Date: Wed, 1 Apr 2026 17:14:22 +0800
+Subject: [PATCH] feat: Ascend NPU adaptation for SkyRL on CANN 8.3
+
+- npu_support/: monkey-patch (torch.cuda->npu proxy), auto-load via .pth
+- Device patches: cuda->npu, nccl->hccl, GPU->NPU across 7 source files
+- model_wrapper.py: flash_attn try/except + eager->sdpa attention
+- fully_async_trainer.py: SKYRL_SKIP_WEIGHT_SYNC debug switch
+- utils/utils.py: proxy env var forwarding to Ray workers
+- Benchmarks: SDPA vs npu_fusion vs triton-ascend attention
+
+Base: 81e5a97 (codescout-npu branch)
+Tested on: Ascend 910 x8, CANN 8.3.RC1, torch 2.8.0, vllm 0.11.0
+---
+ npu_support/README.md                         |  41 ++
+ npu_support/__init__.py                       |   1 +
+ npu_support/apply_npu_patches.py              |  94 +++++
+ npu_support/bench_attention.py                | 142 +++++++
+ npu_support/bench_attention_long.py           | 277 ++++++++++++++
+ npu_support/bench_attn_v2.py                  | 213 +++++++++++
+ npu_support/npu_autoload.pth                  |   1 +
+ npu_support/patch_cuda.py                     | 357 ++++++++++++++++++
+ npu_support/setup.py                          |   9 +
+ npu_support/setup_env.sh                      | 105 ++++++
+ .../skyrl_train/distributed/fsdp_strategy.py  |  16 +-
+ .../skyrl_train/distributed/fsdp_utils.py     |  30 +-
+ .../skyrl_train/distributed/strategy.py       |  14 +-
+ .../skyrl_train/fully_async_trainer.py        |  22 +-
+ .../inference_engines/vllm/vllm_engine.py     |  12 +-
+ skyrl-train/skyrl_train/model_wrapper.py      |   8 +-
+ skyrl-train/skyrl_train/utils/utils.py        |   5 +
+ .../skyrl_train/workers/fsdp/fsdp_worker.py   |  14 +-
+ skyrl-train/skyrl_train/workers/worker.py     |   4 +-
+ 19 files changed, 1312 insertions(+), 53 deletions(-)
+ create mode 100644 npu_support/README.md
+ create mode 100644 npu_support/__init__.py
+ create mode 100644 npu_support/apply_npu_patches.py
+ create mode 100644 npu_support/bench_attention.py
+ create mode 100644 npu_support/bench_attention_long.py
+ create mode 100644 npu_support/bench_attn_v2.py
+ create mode 100644 npu_support/npu_autoload.pth
+ create mode 100644 npu_support/patch_cuda.py
+ create mode 100644 npu_support/setup.py
+ create mode 100755 npu_support/setup_env.sh
+
+diff --git a/npu_support/README.md b/npu_support/README.md
+new file mode 100644
+index 0000000..f9e387c
+--- /dev/null
++++ b/npu_support/README.md
+@@ -0,0 +1,41 @@
++# SkyRL NPU (Ascend) Support
++
++This directory contains everything needed to run SkyRL on Huawei Ascend NPUs.
++
++## How it works
++
++SkyRL is written for CUDA. Instead of forking and patching every file, we use a
++single monkey-patch module (`patch_cuda.py`) that replaces `torch.cuda` with a
++thin proxy to `torch.npu` **before any other code runs**. This means:
++
++- **Zero changes to SkyRL source code**
++- **Zero changes to downstream projects** (e.g. codescout)
++- The patch is applied once at process startup via `import npu_support.patch_cuda`
++
++## Quick Start
++
++```bash
++# 1. Set up the conda environment (one-time)
++bash npu_support/setup_env.sh
++
++# 2. In your training script, add this as the VERY FIRST import:
++#    import npu_support.patch_cuda
++#    (see codescout/scripts/run_async_training_npu.sh for a complete example)
++```
++
++## What gets patched
++
++| Original (CUDA)                    | Replacement (NPU)                  |
++|------------------------------------|-------------------------------------|
++| `torch.cuda.*`                     | `torch.npu.*` (via module proxy)    |
++| `DeviceMesh("cuda", ...)`          | `DeviceMesh("npu", ...)`            |
++| `flash_attn.bert_padding.*`        | no-op stubs (flash_attn unavailable)|
++| `CUDA_VISIBLE_DEVICES`             | `ASCEND_RT_VISIBLE_DEVICES`         |
++| NCCL backend                       | HCCL backend                        |
++
++## Requirements
++
++- CANN 8.5.0+
++- torch 2.8.0 + torch_npu 2.8.0
++- vllm 0.11.0 + vllm-ascend 0.11.0rc1
++- Python 3.12
+diff --git a/npu_support/__init__.py b/npu_support/__init__.py
+new file mode 100644
+index 0000000..4c2f650
+--- /dev/null
++++ b/npu_support/__init__.py
+@@ -0,0 +1 @@
++# NPU support package for SkyRL
+diff --git a/npu_support/apply_npu_patches.py b/npu_support/apply_npu_patches.py
+new file mode 100644
+index 0000000..4923859
+--- /dev/null
++++ b/npu_support/apply_npu_patches.py
+@@ -0,0 +1,94 @@
++"""Apply NPU device patches to SkyRL source files.
++Usage: python apply_npu_patches.py <skyrl_train_dir>
++Example: python apply_npu_patches.py SkyRL/skyrl-train/skyrl_train
++"""
++import sys, os
++
++base = sys.argv[1] if len(sys.argv) > 1 else "skyrl-train/skyrl_train"
++patches = {
++    "distributed/fsdp_utils.py": [
++        ('x = x.to_empty(device=torch.cuda.current_device(), recurse=False)',
++         'x = x.to_empty(device=torch.npu.current_device(), recurse=False)'),
++        ('torch.cuda.empty_cache()', 'torch.npu.empty_cache()'),
++        ('device_id = torch.cuda.current_device()\n',
++         'device_id = torch.npu.current_device()\n'),
++        ('handle.flat_param_to(torch.device(f"cuda:{device_id}"), non_blocking=True)',
++         'handle.flat_param_to(torch.device(f"npu:{device_id}"), non_blocking=True)'),
++        ('device = torch.cuda.current_device()\n    model.to(device',
++         'device = torch.npu.current_device()\n    model.to(device'),
++        ('full_param = full_param.detach().cuda()',
++         'full_param = full_param.detach().npu()'),
++        ('full_tensor = torch.empty(sharded_param.size(), device="cuda"',
++         'full_tensor = torch.empty(sharded_param.size(), device="npu"'),
++        ('device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,)',
++         'device_mesh = init_device_mesh("npu", mesh_shape=(world_size,)'),
++        ('device_mesh = init_device_mesh(\n            "cuda"',
++         'device_mesh = init_device_mesh(\n            "npu"'),
++    ],
++    "distributed/fsdp_strategy.py": [
++        ('torch.cuda.manual_seed_all(seed)', 'torch.npu.manual_seed_all(seed)'),
++        ('torch.cuda.set_device(local_rank)', 'torch.npu.set_device(local_rank)'),
++        ('torch.cuda.synchronize()', 'torch.npu.synchronize()'),
++        ('torch.cuda.empty_cache()', 'torch.npu.empty_cache()'),
++        ('device_id=torch.cuda.current_device()', 'device_id=torch.npu.current_device()'),
++        ('load_fsdp_optimizer(optimizer, torch.cuda.current_device())',
++         'load_fsdp_optimizer(optimizer, torch.npu.current_device())'),
++    ],
++    "distributed/strategy.py": [
++        ('data = data.to(torch.cuda.current_device())',
++         'data = data.to(torch.npu.current_device())'),
++        ('ret = [torch.zeros_like(data).to(torch.cuda.current_device())',
++         'ret = [torch.zeros_like(data).to(torch.npu.current_device())'),
++        ('dist.all_gather(ret, data.to(torch.cuda.current_device()))',
++         'dist.all_gather(ret, data.to(torch.npu.current_device()))'),
++        ('if torch.cuda.is_available() and torch.cuda.device_count() > 0:',
++         'if torch.npu.is_available() and torch.npu.device_count() > 0:'),
++        ('rng_state["cuda"] = torch.cuda.get_rng_state()',
++         'rng_state["npu"] = torch.npu.get_rng_state()'),
++        ('"cuda" in rng_state and torch.cuda.is_available() and torch.cuda.device_count() > 0:',
++         '"npu" in rng_state and torch.npu.is_available() and torch.npu.device_count() > 0:'),
++        ('torch.cuda.set_rng_state(rng_state["cuda"])',
++         'torch.npu.set_rng_state(rng_state["npu"])'),
++    ],
++    "workers/fsdp/fsdp_worker.py": [
++        ('torch.distributed.get_rank() % torch.cuda.device_count()',
++         'torch.distributed.get_rank() % torch.npu.device_count()'),
++        ('torch.cuda.empty_cache()', 'torch.npu.empty_cache()'),
++        ('device = torch.cuda.current_device()', 'device = torch.npu.current_device()'),
++    ],
++    "workers/worker.py": [
++        ('backend="nccl"', 'backend="hccl"'),
++        ('{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node}',
++         '{"NPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node}'),
++    ],
++    "inference_engines/vllm/vllm_engine.py": [
++        ('backend="nccl"', 'backend="hccl"'),
++        ('device="cuda"', 'device="npu"'),
++        ('torch.cuda.current_device()', 'torch.npu.current_device()'),
++        ('torch.cuda.get_device_properties', 'torch.npu.get_device_properties'),
++    ],
++    "model_wrapper.py": [
++        ('from flash_attn.bert_padding import pad_input, unpad_input',
++         'try:\n    from flash_attn.bert_padding import pad_input, unpad_input\n'
++         'except ImportError:\n    pad_input = None\n    unpad_input = None'),
++    ],
++    "utils/utils.py": [],  # proxy forwarding added manually
++}
++
++print(f"Patching {base} for NPU...")
++for relpath, replacements in patches.items():
++    fpath = os.path.join(base, relpath)
++    if not os.path.exists(fpath):
++        print(f"  SKIP {relpath} (not found)")
++        continue
++    with open(fpath, 'r') as f:
++        content = f.read()
++    changed = 0
++    for old, new in replacements:
++        if old in content:
++            content = content.replace(old, new)
++            changed += 1
++    with open(fpath, 'w') as f:
++        f.write(content)
++    print(f"  {relpath}: {changed}/{len(replacements)} replacements")
++print("Done!")
+diff --git a/npu_support/bench_attention.py b/npu_support/bench_attention.py
+new file mode 100644
+index 0000000..3ef5fda
+--- /dev/null
++++ b/npu_support/bench_attention.py
+@@ -0,0 +1,142 @@
++"""
++Benchmark: SDPA vs npu_fusion_attention vs triton-ascend flash attention on Ascend NPU.
++
++Usage:
++    source /usr/local/Ascend/cann-8.5.0/bin/setenv.bash
++    python npu_support/bench_attention.py
++"""
++import time
++import torch
++import torch_npu
++
++DEVICE = torch.device("npu:0")
++DTYPE = torch.bfloat16
++WARMUP = 5
++REPEATS = 20
++
++
++def bench(fn, label, warmup=WARMUP, repeats=REPEATS):
++    """Benchmark a function, return avg ms."""
++    for _ in range(warmup):
++        fn()
++    torch.npu.synchronize()
++
++    t0 = time.perf_counter()
++    for _ in range(repeats):
++        fn()
++    torch.npu.synchronize()
++    elapsed_ms = (time.perf_counter() - t0) / repeats * 1000
++    print(f"  {label:45s}  {elapsed_ms:8.2f} ms")
++    return elapsed_ms
++
++
++def run_sdpa(q, k, v, causal=True):
++    return torch.nn.functional.scaled_dot_product_attention(
++        q, k, v, is_causal=causal
++    )
++
++
++def run_npu_fusion(q_bsh, k_bsh, v_bsh, head_num, head_dim, causal=True):
++    return torch_npu.npu_fusion_attention(
++        q_bsh, k_bsh, v_bsh,
++        head_num=head_num,
++        input_layout="BSH",
++        scale=1.0 / (head_dim ** 0.5),
++        pre_tockens=65536,
++        next_tockens=0 if causal else 65536,
++    )
++
++
++def main():
++    torch.npu.set_device(0)
++
++    configs = [
++        # (batch, heads, seq_len, head_dim)
++        (1,  32, 512,   128),
++        (1,  32, 2048,  128),
++        (1,  32, 4096,  128),
++        (2,  32, 2048,  128),
++        (1,  20, 2048,  128),   # Qwen3-4B: 36 heads, 4 KV heads → 20 Q heads per GQA group? Just test 20
++    ]
++
++    # Check triton-ascend availability
++    has_triton = False
++    try:
++        import triton  # noqa: F401
++        import triton.language as tl  # noqa: F401
++        has_triton = True
++    except ImportError:
++        pass
++
++    print("=" * 72)
++    print("Attention Benchmark on Ascend NPU")
++    print(f"  dtype: {DTYPE}, warmup: {WARMUP}, repeats: {REPEATS}")
++    print(f"  triton-ascend: {'available' if has_triton else 'NOT available'}")
++    print("=" * 72)
++
++    for B, H, S, D in configs:
++        print(f"\n--- B={B}, H={H}, S={S}, D={D} (total {B*H*S*D*2/1e6:.1f} MB per QKV) ---")
++
++        # SDPA format: (B, H, S, D)
++        q = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++        k = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++        v = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++
++        # npu_fusion_attention format: (B, S, H*D) = BSH
++        q_bsh = q.transpose(1, 2).contiguous().view(B, S, H * D)
++        k_bsh = k.transpose(1, 2).contiguous().view(B, S, H * D)
++        v_bsh = v.transpose(1, 2).contiguous().view(B, S, H * D)
++
++        # 1. SDPA
++        bench(lambda: run_sdpa(q, k, v), "PyTorch SDPA (is_causal=True)")
++
++        # 2. npu_fusion_attention
++        bench(lambda: run_npu_fusion(q_bsh, k_bsh, v_bsh, H, D), "npu_fusion_attention (BSH, causal)")
++
++        # 3. SDPA without causal (for reference)
++        bench(lambda: run_sdpa(q, k, v, causal=False), "PyTorch SDPA (no causal)")
++
++        # Correctness check: compare SDPA vs npu_fusion_attention
++        out_sdpa = run_sdpa(q, k, v)
++        out_npu = run_npu_fusion(q_bsh, k_bsh, v_bsh, H, D)[0]
++        out_npu_bhsd = out_npu.view(B, S, H, D).transpose(1, 2)
++        max_diff = (out_sdpa.float() - out_npu_bhsd.float()).abs().max().item()
++        print(f"  {'max |SDPA - npu_fusion|':45s}  {max_diff:.6f}")
++
++    # Backward pass benchmark (training-relevant)
++    print(f"\n{'=' * 72}")
++    print("Backward pass benchmark (B=1, H=32, S=2048, D=128)")
++    print("=" * 72)
++    B, H, S, D = 1, 32, 2048, 128
++
++    q = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    k = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    v = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++
++    def sdpa_fwd_bwd():
++        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
++        out.sum().backward()
++
++    bench(sdpa_fwd_bwd, "SDPA fwd+bwd")
++
++    q_bsh = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    k_bsh = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    v_bsh = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++
++    def npu_fusion_fwd_bwd():
++        out = torch_npu.npu_fusion_attention(
++            q_bsh, k_bsh, v_bsh,
++            head_num=H, input_layout="BSH",
++            scale=1.0 / (D ** 0.5),
++            pre_tockens=65536, next_tockens=0,
++        )
++        out[0].sum().backward()
++
++    bench(npu_fusion_fwd_bwd, "npu_fusion_attention fwd+bwd")
++
++    print(f"\n{'=' * 72}")
++    print("Done!")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/npu_support/bench_attention_long.py b/npu_support/bench_attention_long.py
+new file mode 100644
+index 0000000..fa08bf7
+--- /dev/null
++++ b/npu_support/bench_attention_long.py
+@@ -0,0 +1,277 @@
++"""
++Long-context attention benchmark on Ascend NPU.
++Tests SDPA, npu_fusion_attention, and triton-ascend flash attention
++at sequence lengths relevant to agentic RL training (8k-64k).
++
++Usage:
++    source /usr/local/Ascend/cann-8.5.0/bin/setenv.bash
++    ASCEND_RT_VISIBLE_DEVICES=7 python npu_support/bench_attention_long.py
++
++Uses NPU 7 by default to avoid interfering with training on 0-6.
++"""
++import os
++import time
++import torch
++import torch_npu
++
++DEVICE = torch.device("npu:0")
++DTYPE = torch.bfloat16
++WARMUP = 3
++REPEATS = 10
++
++# Qwen3-4B config: 36 heads, 4 KV heads, head_dim=128
++# For GQA, Q has 36 heads, KV has 4 heads. We benchmark the Q side.
++QWEN3_4B_HEADS = 36
++QWEN3_4B_KV_HEADS = 4
++QWEN3_4B_HEAD_DIM = 128
++
++
++def bench(fn, label, warmup=WARMUP, repeats=REPEATS):
++    for _ in range(warmup):
++        try:
++            fn()
++        except Exception as e:
++            print(f"  {label:50s}  FAILED: {e}")
++            return None
++    torch.npu.synchronize()
++
++    t0 = time.perf_counter()
++    for _ in range(repeats):
++        fn()
++    torch.npu.synchronize()
++    ms = (time.perf_counter() - t0) / repeats * 1000
++    print(f"  {label:50s}  {ms:10.2f} ms")
++    return ms
++
++
++def bench_sdpa(B, H, S, D, causal=True):
++    q = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++    k = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++    v = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++    return bench(
++        lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=causal),
++        f"SDPA (B={B},H={H},S={S},D={D})"
++    )
++
++
++def bench_npu_fusion(B, H, S, D, causal=True):
++    q = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE)
++    k = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE)
++    v = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE)
++    return bench(
++        lambda: torch_npu.npu_fusion_attention(
++            q, k, v, head_num=H, input_layout="BSH",
++            scale=1.0 / (D ** 0.5),
++            pre_tockens=65536, next_tockens=0 if causal else 65536,
++        ),
++        f"npu_fusion_attn (B={B},H={H},S={S},D={D})"
++    )
++
++
++def bench_triton_fa(B, H, S, D, causal=True):
++    """Benchmark triton-ascend flash attention if available."""
++    try:
++        import triton
++        import triton.language as tl
++    except ImportError:
++        print(f"  {'triton FA (not installed)':50s}  SKIPPED")
++        return None
++
++    # Use the official triton-ascend flash attention tutorial kernel
++    # We import it dynamically from the ascend examples
++    try:
++        # Try importing the pre-built flash attention from triton-ascend
++        from triton.runtime import driver
++        
++        # Build a minimal flash attention kernel inline
++        # Based on https://ascend.github.io/triton-ascend/sources/getting-started/tutorials/04-fused-attention.html
++        @triton.jit
++        def _fwd_kernel(
++            Q, K, V, Out,
++            stride_qb, stride_qh, stride_qm, stride_qk,
++            stride_kb, stride_kh, stride_kn, stride_kk,
++            stride_vb, stride_vh, stride_vn, stride_vk,
++            stride_ob, stride_oh, stride_om, stride_ok,
++            N_CTX: tl.constexpr, HEAD_DIM: tl.constexpr,
++            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
++            IS_CAUSAL: tl.constexpr,
++        ):
++            pid_m = tl.program_id(0)
++            pid_bh = tl.program_id(1)
++            off_b = pid_bh // tl.num_programs(1)
++            off_h = pid_bh % tl.num_programs(1)
++
++            offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
++            offs_n = tl.arange(0, BLOCK_N)
++            offs_k = tl.arange(0, HEAD_DIM)
++
++            q_ptrs = Q + off_b * stride_qb + off_h * stride_qh + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
++            q = tl.load(q_ptrs, mask=offs_m[:, None] < N_CTX)
++
++            m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
++            l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
++            acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
++
++            num_blocks_n = (N_CTX + BLOCK_N - 1) // BLOCK_N
++            for j in range(num_blocks_n):
++                start_n = j * BLOCK_N
++                offs_n_j = start_n + tl.arange(0, BLOCK_N)
++
++                k_ptrs = K + off_b * stride_kb + off_h * stride_kh + offs_n_j[:, None] * stride_kn + offs_k[None, :] * stride_kk
++                k = tl.load(k_ptrs, mask=offs_n_j[:, None] < N_CTX)
++
++                qk = tl.dot(q, tl.trans(k))
++                qk *= 1.0 / tl.sqrt(HEAD_DIM * 1.0)
++
++                if IS_CAUSAL:
++                    mask = offs_m[:, None] >= offs_n_j[None, :]
++                    qk = tl.where(mask, qk, float("-inf"))
++
++                m_ij = tl.max(qk, axis=1)
++                m_new = tl.maximum(m_i, m_ij)
++                alpha = tl.exp(m_i - m_new)
++                p = tl.exp(qk - m_new[:, None])
++
++                l_i = l_i * alpha + tl.sum(p, axis=1)
++                acc = acc * alpha[:, None]
++
++                v_ptrs = V + off_b * stride_vb + off_h * stride_vh + offs_n_j[:, None] * stride_vn + offs_k[None, :] * stride_vk
++                v = tl.load(v_ptrs, mask=offs_n_j[:, None] < N_CTX)
++                acc += tl.dot(p.to(v.dtype), v)
++
++                m_i = m_new
++
++            acc = acc / l_i[:, None]
++            out_ptrs = Out + off_b * stride_ob + off_h * stride_oh + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
++            tl.store(out_ptrs, acc.to(Out.dtype.element_ty), mask=offs_m[:, None] < N_CTX)
++
++        q = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++        k = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++        v = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++        out = torch.empty_like(q)
++
++        BLOCK_M = min(128, S)
++        BLOCK_N = min(128, S)
++        grid = (S // BLOCK_M, B * H)
++
++        def run():
++            _fwd_kernel[grid](
++                q, k, v, out,
++                q.stride(0), q.stride(1), q.stride(2), q.stride(3),
++                k.stride(0), k.stride(1), k.stride(2), k.stride(3),
++                v.stride(0), v.stride(1), v.stride(2), v.stride(3),
++                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
++                N_CTX=S, HEAD_DIM=D,
++                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
++                IS_CAUSAL=causal,
++            )
++
++        return bench(run, f"triton FA (B={B},H={H},S={S},D={D})")
++
++    except Exception as e:
++        print(f"  {'triton FA':50s}  ERROR: {e}")
++        return None
++
++
++def bench_sdpa_fwd_bwd(B, H, S, D):
++    q = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    k = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    v = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    def run():
++        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
++        out.sum().backward()
++        q.grad = k.grad = v.grad = None
++    return bench(run, f"SDPA fwd+bwd (B={B},H={H},S={S},D={D})")
++
++
++def bench_npu_fusion_fwd_bwd(B, H, S, D):
++    q = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    k = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    v = torch.randn(B, S, H * D, dtype=DTYPE, device=DEVICE, requires_grad=True)
++    def run():
++        out = torch_npu.npu_fusion_attention(
++            q, k, v, head_num=H, input_layout="BSH",
++            scale=1.0 / (D ** 0.5),
++            pre_tockens=65536, next_tockens=0,
++        )
++        out[0].sum().backward()
++        q.grad = k.grad = v.grad = None
++    return bench(run, f"npu_fusion fwd+bwd (B={B},H={H},S={S},D={D})")
++
++
++def main():
++    torch.npu.set_device(0)
++
++    print("=" * 80)
++    print("Long-Context Attention Benchmark on Ascend NPU")
++    print(f"  dtype: {DTYPE}, warmup: {WARMUP}, repeats: {REPEATS}")
++    print(f"  Qwen3-4B config: {QWEN3_4B_HEADS}h, {QWEN3_4B_HEAD_DIM}d")
++
++    has_triton = False
++    try:
++        import triton
++        has_triton = True
++        print(f"  triton-ascend: {triton.__version__}")
++    except ImportError:
++        print(f"  triton-ascend: NOT available")
++    print("=" * 80)
++
++    # ---- Forward-only benchmark ----
++    # Use Qwen3-4B-like config but with fewer heads to fit in memory at long seqs
++    configs = [
++        # (B, H, S, D) — realistic agentic training lengths
++        (1, 32, 2048,  128),   # baseline
++        (1, 32, 8192,  128),   # 8k
++        (1, 32, 16384, 128),   # 16k
++        (1, 32, 32768, 128),   # 32k — typical agentic
++        (1, 16, 32768, 128),   # 32k fewer heads (GQA KV side)
++        (1, 32, 65536, 128),   # 64k — long agentic
++    ]
++
++    print(f"\n{'─' * 80}")
++    print("Forward pass (causal)")
++    print(f"{'─' * 80}")
++
++    results = []
++    for B, H, S, D in configs:
++        mem_mb = B * H * S * D * 2 * 3 / 1e6  # 3 tensors, bf16
++        print(f"\n  B={B}, H={H}, S={S}, D={D}  (QKV: {mem_mb:.0f} MB)")
++
++        t_sdpa = bench_sdpa(B, H, S, D)
++        t_npu = bench_npu_fusion(B, H, S, D)
++        t_triton = bench_triton_fa(B, H, S, D) if has_triton else None
++
++        results.append((B, H, S, D, t_sdpa, t_npu, t_triton))
++
++    # ---- Forward+Backward benchmark (training-relevant) ----
++    print(f"\n{'─' * 80}")
++    print("Forward + Backward (causal) — training-relevant")
++    print(f"{'─' * 80}")
++
++    bwd_configs = [
++        (1, 32, 2048,  128),
++        (1, 32, 8192,  128),
++        (1, 32, 16384, 128),
++        (1, 32, 32768, 128),
++    ]
++
++    for B, H, S, D in bwd_configs:
++        print(f"\n  B={B}, H={H}, S={S}, D={D}")
++        bench_sdpa_fwd_bwd(B, H, S, D)
++        bench_npu_fusion_fwd_bwd(B, H, S, D)
++
++    # ---- Summary ----
++    print(f"\n{'=' * 80}")
++    print("Summary (forward only, ms)")
++    print(f"{'S':>8s}  {'SDPA':>10s}  {'npu_fusion':>10s}  {'triton_FA':>10s}  {'winner':>12s}")
++    print(f"{'─' * 60}")
++    for B, H, S, D, t_sdpa, t_npu, t_triton in results:
++        vals = {"SDPA": t_sdpa, "npu_fusion": t_npu, "triton_FA": t_triton}
++        valid = {k: v for k, v in vals.items() if v is not None}
++        winner = min(valid, key=valid.get) if valid else "N/A"
++        print(f"{S:>8d}  {t_sdpa or 0:>10.2f}  {t_npu or 0:>10.2f}  {t_triton or 0:>10.2f}  {winner:>12s}")
++    print("=" * 80)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/npu_support/bench_attn_v2.py b/npu_support/bench_attn_v2.py
+new file mode 100644
+index 0000000..feb4ff8
+--- /dev/null
++++ b/npu_support/bench_attn_v2.py
+@@ -0,0 +1,213 @@
++"""
++Long-context attention benchmark: SDPA vs npu_fusion_attention vs triton-ascend FA.
++Uses the official triton-ascend fused attention kernel from:
++https://ascend.github.io/triton-ascend/sources/getting-started/tutorials/04-fused-attention.html
++
++Usage:
++    source /usr/local/Ascend/cann-8.5.0/bin/setenv.bash
++    ASCEND_RT_VISIBLE_DEVICES=7 python npu_support/bench_attn_v2.py
++"""
++import time, torch, torch_npu, triton, triton.language as tl
++
++DEVICE = "npu"
++DTYPE = torch.bfloat16
++WARMUP, REPEATS = 3, 10
++
++# ─── Official triton-ascend flash attention kernel (forward only) ───
++@triton.jit
++def _attn_fwd_inner(acc_ptr, l_i, m_i, q, K_block_ptr, V_block_ptr,
++                    start_m, qk_scale,
++                    BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr, BLOCK_N: tl.constexpr,
++                    STAGE: tl.constexpr, offs_m: tl.constexpr, offs_n: tl.constexpr,
++                    N_CTX: tl.constexpr, fp8_v: tl.constexpr):
++    if STAGE == 1:
++        lo, hi = 0, start_m * BLOCK_M
++    elif STAGE == 2:
++        lo, hi = start_m * BLOCK_M, (start_m + 1) * BLOCK_M
++        lo = tl.multiple_of(lo, BLOCK_M)
++    else:
++        lo, hi = 0, N_CTX
++    K_block_ptr = tl.advance(K_block_ptr, (lo, 0))
++    V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
++    for start_n in range(lo, hi, BLOCK_N):
++        start_n = tl.multiple_of(start_n, BLOCK_N)
++        k = tl.load(K_block_ptr)
++        qk = tl.dot(q, tl.trans(k))
++        if STAGE == 2:
++            mask = offs_m[:, None] >= (start_n + offs_n[None, :])
++            qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
++            m_ij = tl.maximum(m_i, tl.max(qk, 1))
++            qk -= m_ij[:, None]
++        else:
++            qk = qk * qk_scale
++            m_ij = tl.maximum(m_i, tl.max(qk, 1))
++            qk = qk - m_ij[:, None]
++        p = tl.math.exp(qk)
++        p_cast = p.to(k.dtype)
++        v = tl.load(V_block_ptr)
++        l_ij = tl.sum(p, 1)
++        alpha = tl.math.exp(m_i - m_ij)
++        l_i = l_i * alpha + l_ij
++        acc_ptr = acc_ptr * alpha[:, None]
++        acc_ptr = tl.dot(p_cast, v, acc_ptr)
++        m_i = m_ij
++        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
++        K_block_ptr = tl.advance(K_block_ptr, (BLOCK_N, 0))
++    return acc_ptr, l_i, m_i
++
++
++@triton.jit
++def _attn_fwd(Q, K, V, M, Out, acc, sm_scale,
++              stride_qz: tl.constexpr, stride_qh: tl.constexpr, stride_qm: tl.constexpr, stride_qk: tl.constexpr,
++              stride_kz: tl.constexpr, stride_kh: tl.constexpr, stride_kn: tl.constexpr, stride_kk: tl.constexpr,
++              stride_vz: tl.constexpr, stride_vh: tl.constexpr, stride_vn: tl.constexpr, stride_vk: tl.constexpr,
++              stride_oz: tl.constexpr, stride_oh: tl.constexpr, stride_om: tl.constexpr, stride_on: tl.constexpr,
++              Z: tl.constexpr, H: tl.constexpr, N_CTX: tl.constexpr, HEAD_DIM: tl.constexpr,
++              BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, STAGE: tl.constexpr):
++    NUM_BLOCKS_M = N_CTX // BLOCK_M
++    NUM_BLOCKS = NUM_BLOCKS_M * Z * H
++    pid = tl.program_id(0)
++    for block_idx in range(pid, NUM_BLOCKS, 20):
++        task_hz_idx = block_idx // NUM_BLOCKS_M
++        task_m_idx = block_idx % NUM_BLOCKS_M
++        off_z = task_hz_idx // H
++        off_h = task_hz_idx % H
++        qvk_offset = off_z.to(tl.int64) * stride_qz + off_h.to(tl.int64) * stride_qh
++        Q_block_ptr = tl.make_block_ptr(base=Q + qvk_offset, shape=(N_CTX, HEAD_DIM),
++            strides=(stride_qm, stride_qk), offsets=(task_m_idx * BLOCK_M, 0),
++            block_shape=(BLOCK_M, HEAD_DIM), order=(1, 0))
++        V_block_ptr = tl.make_block_ptr(base=V + qvk_offset, shape=(N_CTX, HEAD_DIM),
++            strides=(stride_vn, stride_vk), offsets=(0, 0),
++            block_shape=(BLOCK_N, HEAD_DIM), order=(1, 0))
++        K_block_ptr = tl.make_block_ptr(base=K + qvk_offset, shape=(N_CTX, HEAD_DIM),
++            strides=(stride_kn, stride_kk), offsets=(0, 0),
++            block_shape=(BLOCK_N, HEAD_DIM), order=(1, 0))
++        O_block_ptr = tl.make_block_ptr(base=Out + qvk_offset, shape=(N_CTX, HEAD_DIM),
++            strides=(stride_om, stride_on), offsets=(task_m_idx * BLOCK_M, 0),
++            block_shape=(BLOCK_M, HEAD_DIM), order=(1, 0))
++        offs_m = task_m_idx * BLOCK_M + tl.arange(0, BLOCK_M)
++        offs_n = tl.arange(0, BLOCK_N)
++        m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
++        l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
++        acc_ptr = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
++        q = tl.load(Q_block_ptr)
++        if STAGE & 1:
++            acc_ptr, l_i, m_i = _attn_fwd_inner(acc_ptr, l_i, m_i, q, K_block_ptr, V_block_ptr,
++                task_m_idx, sm_scale, BLOCK_M, HEAD_DIM, BLOCK_N,
++                4 - STAGE, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.float8e5)
++        if STAGE & 2:
++            acc_ptr, l_i, m_i = _attn_fwd_inner(acc_ptr, l_i, m_i, q, K_block_ptr, V_block_ptr,
++                task_m_idx, sm_scale, BLOCK_M, HEAD_DIM, BLOCK_N,
++                2, offs_m, offs_n, N_CTX, V.dtype.element_ty == tl.
++float8e5)
++        m_i += tl.math.log(l_i)
++        accumulator = acc_ptr / l_i[:, None]
++        m_ptrs = M + task_hz_idx * N_CTX + offs_m
++        tl.store(m_ptrs, m_i)
++        tl.store(O_block_ptr, accumulator.to(Out.type.element_ty))
++
++
++def triton_attention(q, k, v, causal, sm_scale, BM=128, BN=128):
++    """Wrapper for the triton-ascend flash attention kernel."""
++    o = torch.empty_like(q)
++    acc = torch.zeros_like(q, dtype=torch.float32)
++    M = torch.empty((q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32)
++    stage = 3 if causal else 1
++    _attn_fwd[(20,)](
++        q, k, v, M, o, acc, sm_scale,
++        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
++        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
++        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
++        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
++        q.shape[0], q.shape[1], N_CTX=q.shape[2], HEAD_DIM=q.shape[3],
++        BLOCK_M=BM, BLOCK_N=BN, STAGE=stage)
++    return o
++
++
++# ─── Benchmark harness ───
++def bench(fn, label, warmup=WARMUP, repeats=REPEATS):
++    for _ in range(warmup):
++        try: fn()
++        except Exception as e:
++            print(f"  {label:50s}  FAILED: {type(e).__name__}: {e}")
++            return None
++    torch.npu.synchronize()
++    t0 = time.perf_counter()
++    for _ in range(repeats):
++        fn()
++    torch.npu.synchronize()
++    ms = (time.perf_counter() - t0) / repeats * 1000
++    print(f"  {label:50s}  {ms:10.2f} ms")
++    return ms
++
++
++def main():
++    torch.npu.set_device(0)
++    D = 128
++    sm_scale = 1.0 / (D ** 0.5)
++
++    configs = [
++        # (B, H, S)
++        (1, 32, 2048),
++        (1, 32, 8192),
++        (1, 32, 16384),
++        (1, 32, 32768),
++        (1, 16, 32768),
++        (1, 32, 65536),
++    ]
++
++    print("=" * 85)
++    print("Long-Context Attention Benchmark: SDPA vs npu_fusion vs triton-ascend FA")
++    print(f"  dtype={DTYPE}, head_dim={D}, causal=True, warmup={WARMUP}, repeats={REPEATS}")
++    print("=" * 85)
++
++    results = []
++    for B, H, S in configs:
++        print(f"\n--- B={B}, H={H}, S={S}, D={D} ---")
++        q = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++        k = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++        v = torch.randn(B, H, S, D, dtype=DTYPE, device=DEVICE)
++
++        # SDPA
++        t1 = bench(lambda: torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True), "SDPA")
++
++        # npu_fusion_attention (BSH layout)
++        q_bsh = q.transpose(1, 2).contiguous().view(B, S, H * D)
++        k_bsh = k.transpose(1, 2).contiguous().view(B, S, H * D)
++        v_bsh = v.transpose(1, 2).contiguous().view(B, S, H * D)
++        t2 = bench(lambda: torch_npu.npu_fusion_attention(
++            q_bsh, k_bsh, v_bsh, head_num=H, input_layout="BSH",
++            scale=sm_scale, pre_tockens=65536, next_tockens=0), "npu_fusion_attention (BSH)")
++
++        # npu_fusion_attention (BNSD layout, no reshape needed)
++        t2b = bench(lambda: torch_npu.npu_fusion_attention(
++            q, k, v, H, input_layout="BNSD",
++            scale=sm_scale, pre_tockens=65536, next_tockens=0), "npu_fusion_attention (BNSD)")
++
++        # triton-ascend FA — HEAD_DIM=128 needs smaller blocks to fit in UB
++        # HEAD_DIM=128: BM=32,BN=64 verified working
++        # HEAD_DIM=64:  BM=64,BN=128 (official tutorial)
++        BM = 32 if D >= 128 else 64
++        BN = 64 if D >= 128 else 128
++        t3 = bench(lambda: triton_attention(q, k, v, causal=True, sm_scale=sm_scale, BM=BM, BN=BN),
++                   "triton-ascend FA")
++
++        results.append((S, H, t1, t2, t2b, t3))
++
++    # Summary
++    print(f"\n{'=' * 85}")
++    print(f"{'S':>8} {'H':>4}  {'SDPA':>10}  {'npu_fus BSH':>12}  {'npu_fus BNSD':>13}  {'triton FA':>10}  {'winner':>10}")
++    print("-" * 85)
++    for S, H, t1, t2, t2b, t3 in results:
++        vals = {}
++        if t1: vals["SDPA"] = t1
++        if t2: vals["npu_BSH"] = t2
++        if t2b: vals["npu_BNSD"] = t2b
++        if t3: vals["triton"] = t3
++        winner = min(vals, key=vals.get) if vals else "N/A"
++        print(f"{S:>8} {H:>4}  {t1 or 0:>10.2f}  {t2 or 0:>12.2f}  {t2b or 0:>13.2f}  {t3 or 0:>10.2f}  {winner:>10}")
++    print("=" * 85)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/npu_support/npu_autoload.pth b/npu_support/npu_autoload.pth
+new file mode 100644
+index 0000000..65a5567
+--- /dev/null
++++ b/npu_support/npu_autoload.pth
+@@ -0,0 +1 @@
++import npu_support.patch_cuda
+diff --git a/npu_support/patch_cuda.py b/npu_support/patch_cuda.py
+new file mode 100644
+index 0000000..ca9f220
+--- /dev/null
++++ b/npu_support/patch_cuda.py
+@@ -0,0 +1,357 @@
++"""
++Monkey-patch torch.cuda → torch.npu for running CUDA-only code on Ascend NPU.
++
++Import this module ONCE at the very start of your program, before any other
++torch imports:
++
++    import npu_support.patch_cuda   # noqa: F401  — must be first!
++    import torch
++    ...
++
++After this, all code that calls torch.cuda.* will transparently use NPU.
++This includes PyTorch internals (FSDP, DeviceMesh, etc.).
++
++The patch is skipped if real CUDA is available, so this is safe to import
++unconditionally.
++"""
++
++import importlib
++import logging
++import os
++import sys
++import types
++
++logger = logging.getLogger("npu_support.patch_cuda")
++
++_PATCHED = False
++
++
++def _should_patch():
++    """Decide whether to apply the NPU patch."""
++    if os.environ.get("SKYRL_NO_NPU_PATCH", "0") == "1":
++        return False
++    try:
++        import torch
++        if torch.cuda.is_available():
++            return False  # Real CUDA present, no patching needed
++    except Exception:
++        pass
++    try:
++        import torch_npu  # noqa: F401
++        import torch
++        return hasattr(torch, "npu") and torch.npu.is_available()
++    except ImportError:
++        return False
++
++
++class _CudaProxy(types.ModuleType):
++    """
++    A module proxy that forwards attribute access from torch.cuda to torch.npu.
++
++    This is the key trick: we replace sys.modules["torch.cuda"] with this proxy.
++    Any code doing `import torch.cuda` or `torch.cuda.xxx()` will hit __getattr__
++    here and get redirected to torch.npu.
++
++    We keep a reference to the original torch.cuda so we can fall back for
++    attributes that don't exist on torch.npu (e.g. documentation strings).
++    """
++
++    def __init__(self, orig_cuda, npu_mod):
++        super().__init__("torch.cuda")
++        self._orig = orig_cuda
++        self._npu = npu_mod
++        # Copy over module metadata
++        self.__package__ = getattr(orig_cuda, "__package__", "torch.cuda")
++        self.__path__ = getattr(orig_cuda, "__path__", [])
++        self.__file__ = getattr(orig_cuda, "__file__", "")
++        self.__loader__ = getattr(orig_cuda, "__loader__", None)
++        self.__spec__ = getattr(orig_cuda, "__spec__", None)
++
++    def __getattr__(self, name):
++        # Priority: npu module first, then original cuda as fallback
++        if hasattr(self._npu, name):
++            return getattr(self._npu, name)
++        if hasattr(self._orig, name):
++            return getattr(self._orig, name)
++        raise AttributeError(f"module 'torch.cuda' (proxied to torch.npu) has no attribute '{name}'")
++
++
++class _NPUDeviceProperties:
++    """Stub for torch.cuda.get_device_properties() on NPU."""
++    def __init__(self, idx):
++        self.name = f"Ascend NPU {idx}"
++        self.uuid = f"NPU-{idx}"
++        self.major = 9
++        self.minor = 0
++        self.total_memory = 64 * 1024 * 1024 * 1024  # 64 GB HBM
++        self.multi_processor_count = 32
++
++
++def _apply_patch():
++    global _PATCHED
++    if _PATCHED:
++        return
++    _PATCHED = True
++
++    import torch
++    import torch_npu  # noqa: F401
++
++    orig_cuda = torch.cuda
++    npu = torch.npu
++
++    # --- 1. Replace torch.cuda module with our proxy ---
++    proxy = _CudaProxy(orig_cuda, npu)
++
++    # Override specific functions that need special handling
++    proxy.is_available = lambda: True
++    proxy.device_count = npu.device_count
++    proxy.current_device = npu.current_device
++    proxy.set_device = npu.set_device
++    proxy.empty_cache = npu.empty_cache
++    proxy.synchronize = npu.synchronize
++    proxy.manual_seed = npu.manual_seed
++    proxy.manual_seed_all = npu.manual_seed_all
++    proxy.memory_allocated = npu.memory_allocated
++    proxy.max_memory_allocated = npu.max_memory_allocated
++
++    if hasattr(npu, "get_rng_state"):
++        proxy.get_rng_state = npu.get_rng_state
++    if hasattr(npu, "set_rng_state"):
++        proxy.set_rng_state = npu.set_rng_state
++    if hasattr(npu, "mem_get_info"):
++        proxy.mem_get_info = npu.mem_get_info
++
++    def _get_device_properties(device=None):
++        if device is None:
++            device = npu.current_device()
++        if isinstance(device, torch.device):
++            device = device.index or 0
++        return _NPUDeviceProperties(device)
++    proxy.get_device_properties = _get_device_properties
++
++    def _ipc_collect():
++        pass  # No-op on NPU
++    proxy.ipc_collect = _ipc_collect
++
++    # Proxy the memory sub-module too
++    if hasattr(orig_cuda, "memory"):
++        mem_proxy = types.SimpleNamespace()
++        if hasattr(npu, "mem_get_info"):
++            mem_proxy.mem_get_info = npu.mem_get_info
++        proxy.memory = mem_proxy
++
++    # Install the proxy
++    sys.modules["torch.cuda"] = proxy
++    torch.cuda = proxy
++
++    # --- 1b. Patch Tensor.cuda() → Tensor.npu() ---
++    _orig_tensor_cuda = torch.Tensor.cuda
++
++    def _tensor_cuda(self, device=None, non_blocking=False, **kwargs):
++        if device is None:
++            return self.npu(npu.current_device(), non_blocking=non_blocking)
++        if isinstance(device, int):
++            return self.npu(device, non_blocking=non_blocking)
++        return self.npu(non_blocking=non_blocking)
++
++    torch.Tensor.cuda = _tensor_cuda
++
++    # --- 2. Patch init_device_mesh to use "npu" instead of "cuda" ---
++    try:
++        from torch.distributed.device_mesh import init_device_mesh as _orig_init_device_mesh
++
++        def _patched_init_device_mesh(device_type, *args, **kwargs):
++            if device_type == "cuda":
++                device_type = "npu"
++            return _orig_init_device_mesh(device_type, *args, **kwargs)
++
++        import torch.distributed.device_mesh
++        torch.distributed.device_mesh.init_device_mesh = _patched_init_device_mesh
++        # Also patch the commonly used import path
++        if hasattr(torch.distributed, "init_device_mesh"):
++            torch.distributed.init_device_mesh = _patched_init_device_mesh
++    except ImportError:
++        pass
++
++    # --- 3. Patch flash_attn imports (not available on NPU) ---
++    _install_flash_attn_stub()
++
++    # --- 4. Patch Ray to use NPU resources instead of GPU ---
++    _patch_ray_for_npu()
++
++    # --- 4b. Patch torch.distributed to use HCCL instead of NCCL ---
++    _orig_init_pg = torch.distributed.init_process_group
++
++    def _patched_init_process_group(*args, **kwargs):
++        if kwargs.get("backend") == "nccl":
++            kwargs["backend"] = "hccl"
++        elif len(args) > 0 and args[0] == "nccl":
++            args = ("hccl",) + args[1:]
++        return _orig_init_pg(*args, **kwargs)
++
++    torch.distributed.init_process_group = _patched_init_process_group
++
++    # Also patch the StatelessProcessGroup used by vllm weight sync
++    try:
++        from torch.distributed import new_group as _orig_new_group
++
++        def _patched_new_group(*args, **kwargs):
++            if kwargs.get("backend") == "nccl":
++                kwargs["backend"] = "hccl"
++            return _orig_new_group(*args, **kwargs)
++
++        torch.distributed.new_group = _patched_new_group
++    except Exception:
++        pass
++
++    # --- 5. Set NPU-friendly environment defaults ---
++    os.environ.setdefault("HCCL_CONNECT_TIMEOUT", "360")
++    os.environ.setdefault("HCCL_EXEC_TIMEOUT", "360")
++
++    logger.info("NPU patch applied: torch.cuda → torch.npu, DeviceMesh → npu, flash_attn stubbed, Ray GPU→NPU")
++
++
++def _patch_ray_for_npu():
++    """Patch Ray to treat NPU as the accelerator resource.
++
++    Ray doesn't natively map NPU to GPU. We patch:
++    1. ray.remote() — convert num_gpus=N to resources={"NPU": N}
++    2. The placement_group function — convert {"GPU": N} bundles to {"NPU": N}
++    """
++    try:
++        import ray
++    except ImportError:
++        return
++
++    # --- Patch ray.remote to convert num_gpus → NPU resource ---
++    _orig_remote = ray.remote
++
++    def _patched_remote(*args, **kwargs):
++        if "num_gpus" in kwargs and kwargs["num_gpus"]:
++            n = kwargs.pop("num_gpus")
++            resources = kwargs.get("resources", {}) or {}
++            resources["NPU"] = n
++            kwargs["resources"] = resources
++        result = _orig_remote(*args, **kwargs)
++        # Also patch the .options() method on the returned RemoteFunction/ActorClass
++        if hasattr(result, "options"):
++            _orig_options = result.options
++
++            def _patched_options(**opt_kwargs):
++                if "num_gpus" in opt_kwargs and opt_kwargs["num_gpus"]:
++                    n = opt_kwargs.pop("num_gpus")
++                    resources = opt_kwargs.get("resources", {}) or {}
++                    resources["NPU"] = n
++                    opt_kwargs["resources"] = resources
++                return _orig_options(**opt_kwargs)
++
++            result.options = _patched_options
++        return result
++
++    ray.remote = _patched_remote
++
++    # --- Also patch ActorClass.options and RemoteFunction.options ---
++    # This catches `SomeActor.options(num_gpus=1).remote(...)` patterns
++    try:
++        from ray.actor import ActorClass
++        _orig_actor_options = ActorClass.options
++
++        def _patched_actor_options(self, **opt_kwargs):
++            if "num_gpus" in opt_kwargs and opt_kwargs["num_gpus"]:
++                n = opt_kwargs.pop("num_gpus")
++                resources = opt_kwargs.get("resources", {}) or {}
++                resources["NPU"] = n
++                opt_kwargs["resources"] = resources
++            return _orig_actor_options(self, **opt_kwargs)
++
++        ActorClass.options = _patched_actor_options
++    except Exception:
++        pass
++
++    try:
++        from ray.remote_function import RemoteFunction
++        _orig_func_options = RemoteFunction.options
++
++        def _patched_func_options(self, **opt_kwargs):
++            if "num_gpus" in opt_kwargs and opt_kwargs["num_gpus"]:
++                n = opt_kwargs.pop("num_gpus")
++                resources = opt_kwargs.get("resources", {}) or {}
++                resources["NPU"] = n
++                opt_kwargs["resources"] = resources
++            return _orig_func_options(self, **opt_kwargs)
++
++        RemoteFunction.options = _patched_func_options
++    except Exception:
++        pass
++
++    # --- Patch placement_group to convert GPU → NPU in bundles ---
++    # The function lives in ray.util.placement_group module
++    try:
++        import importlib
++        _pg_module = importlib.import_module("ray.util.placement_group")
++        _orig_pg = _pg_module.placement_group
++
++        def _patched_placement_group(bundles, *args, **kwargs):
++            patched_bundles = []
++            for bundle in bundles:
++                new_bundle = {}
++                for k, v in bundle.items():
++                    if k == "GPU":
++                        new_bundle["NPU"] = v
++                    else:
++                        new_bundle[k] = v
++                patched_bundles.append(new_bundle)
++            return _orig_pg(patched_bundles, *args, **kwargs)
++
++        _pg_module.placement_group = _patched_placement_group
++    except Exception as e:
++        logger.warning(f"Failed to patch placement_group: {e}")
++
++
++def _install_flash_attn_stub():
++    """Install a stub for flash_attn so imports don't crash."""
++    if "flash_attn" in sys.modules:
++        return  # Already imported (maybe real flash_attn is available)
++    try:
++        import flash_attn  # noqa: F401
++        return  # Real flash_attn available, don't stub
++    except ImportError:
++        pass
++
++    def _make_stub(name, is_package=False):
++        mod = types.ModuleType(name)
++        mod.__package__ = name.rsplit(".", 1)[0] if "." in name else name
++        # Give it a proper __spec__ so importlib.util.find_spec() doesn't choke
++        mod.__spec__ = importlib.machinery.ModuleSpec(name, None, is_package=is_package)
++        if is_package:
++            mod.__path__ = []
++        mod.__version__ = "0.0.0"  # stub version
++        return mod
++
++    flash_attn_mod = _make_stub("flash_attn", is_package=True)
++
++    bert_padding = _make_stub("flash_attn.bert_padding")
++
++    def _pad_input(hidden_states, indices, batch, seqlen):
++        raise NotImplementedError("flash_attn.bert_padding.pad_input is not available on NPU")
++
++    def _unpad_input(hidden_states, attention_mask):
++        raise NotImplementedError("flash_attn.bert_padding.unpad_input is not available on NPU")
++
++    bert_padding.pad_input = _pad_input
++    bert_padding.unpad_input = _unpad_input
++
++    ops_mod = _make_stub("flash_attn.ops", is_package=True)
++    triton_mod = _make_stub("flash_attn.ops.triton", is_package=True)
++    ce_mod = _make_stub("flash_attn.ops.triton.cross_entropy")
++
++    sys.modules["flash_attn"] = flash_attn_mod
++    sys.modules["flash_attn.bert_padding"] = bert_padding
++    sys.modules["flash_attn.ops"] = ops_mod
++    sys.modules["flash_attn.ops.triton"] = triton_mod
++    sys.modules["flash_attn.ops.triton.cross_entropy"] = ce_mod
++
++
++# --- Auto-apply on import ---
++if _should_patch():
++    _apply_patch()
+diff --git a/npu_support/setup.py b/npu_support/setup.py
+new file mode 100644
+index 0000000..e0292d9
+--- /dev/null
++++ b/npu_support/setup.py
+@@ -0,0 +1,9 @@
++from setuptools import setup, find_packages
++
++setup(
++    name="npu_support",
++    version="0.1.0",
++    packages=find_packages(where="."),
++    package_dir={"": "."},
++    py_modules=["npu_support"],
++)
+diff --git a/npu_support/setup_env.sh b/npu_support/setup_env.sh
+new file mode 100755
+index 0000000..320de09
+--- /dev/null
++++ b/npu_support/setup_env.sh
+@@ -0,0 +1,105 @@
++#!/bin/bash
++# One-click environment setup for SkyRL + CodeScout on Ascend NPU.
++#
++# Usage:
++#   bash npu_support/setup_env.sh [CONDA_BASE]
++#
++# Arguments:
++#   CONDA_BASE  Path to miniforge/miniconda base (default: /sharedata/liyuchen/miniforge3)
++#
++# This script creates a conda env "codescout-npu" with:
++#   - Python 3.12
++#   - torch 2.8.0 + torch_npu 2.8.0
++#   - vllm 0.11.0 + vllm-ascend (copied from a working 3.11 env if available)
++#   - SkyRL (editable install from local repo)
++#   - All codescout training dependencies
++
++set -euo pipefail
++
++CONDA_BASE="${1:-/sharedata/liyuchen/miniforge3}"
++ENV_NAME="codescout-npu"
++ENV_PATH="$CONDA_BASE/envs/$ENV_NAME"
++PIP="$ENV_PATH/bin/pip"
++PYTHON="$ENV_PATH/bin/python"
++
++SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
++SKYRL_ROOT="$(dirname "$SCRIPT_DIR")"
++
++echo "=== SkyRL NPU Environment Setup ==="
++echo "Conda base:  $CONDA_BASE"
++echo "Env name:    $ENV_NAME"
++echo "SkyRL root:  $SKYRL_ROOT"
++echo ""
++
++# ---------- Step 1: Create conda env ----------
++if [ -d "$ENV_PATH" ]; then
++    echo "[1/6] Env $ENV_NAME already exists, skipping creation."
++else
++    echo "[1/6] Creating conda env $ENV_NAME with Python 3.12..."
++    "$CONDA_BASE/bin/conda" create -n "$ENV_NAME" python=3.12 -y
++fi
++
++# ---------- Step 2: Install torch + torch_npu ----------
++echo "[2/6] Installing torch + torch_npu..."
++$PIP install torch-npu==2.8.0.post2 numpy pyyaml 2>&1 | tail -3
++
++# ---------- Step 3: Install training dependencies ----------
++echo "[3/6] Installing training dependencies..."
++$PIP install \
++    hydra-core==1.3.2 omegaconf accelerate peft wandb datasets \
++    tensordict jaxtyping polars torchdata func_timeout \
++    loguru tqdm ninja tensorboard "transformers>=4.57,<5" \
++    "ray==2.51.1" debugpy==1.8.0 hf_transfer \
++    gcsfs litellm docker tenacity authlib \
++    s3fs pybind11 setuptools \
++    2>&1 | tail -3
++
++# ---------- Step 4: Install SkyRL + skyrl-gym ----------
++echo "[4/6] Installing SkyRL (editable)..."
++$PIP install -e "$SKYRL_ROOT" --no-deps --no-build-isolation 2>&1 | tail -2
++$PIP install -e "$SKYRL_ROOT/skyrl-gym" --no-deps --no-build-isolation 2>&1 | tail -2
++
++# ---------- Step 5: Install openhands SDK ----------
++echo "[5/6] Installing openhands SDK..."
++$PIP install openhands-tools openhands-agent-server openhands-workspace openhands-sdk --no-deps 2>&1 | tail -2
++$PIP install agent-client-protocol deprecation "fakeredis[lua]" fastmcp lmnr \
++    python-frontmatter sqlalchemy wsproto fastapi alembic python-json-logger \
++    binaryornot aiosqlite libtmux bashlex tom-swe \
++    2>&1 | tail -3
++
++# ---------- Step 6: Install vllm + vllm-ascend ----------
++echo "[6/6] Installing vllm..."
++$PIP install vllm==0.11.0 --no-deps 2>&1 | tail -2
++
++# vllm-ascend can't be pip-installed easily (build deps conflict).
++# Copy from an existing working env if available.
++DONOR_ENV="$CONDA_BASE/envs/codescout"
++if [ -d "$DONOR_ENV/lib/python3.11/site-packages/vllm_ascend" ]; then
++    echo "   Copying vllm-ascend from $DONOR_ENV..."
++    cp -r "$DONOR_ENV/lib/python3.11/site-packages/vllm_ascend" \
++          "$ENV_PATH/lib/python3.12/site-packages/vllm_ascend"
++else
++    echo "   WARNING: No donor env found for vllm-ascend."
++    echo "   You'll need to install vllm-ascend manually."
++fi
++
++# ---------- Verify ----------
++echo ""
++echo "=== Verifying installation ==="
++source /usr/local/Ascend/cann-8.5.0/bin/setenv.bash 2>/dev/null || true
++$PYTHON -c "
++import torch_npu, torch
++print(f'  torch={torch.__version__}, torch_npu={torch_npu.__version__}')
++print(f'  NPU available: {torch.npu.is_available()}, count: {torch.npu.device_count()}')
++import skyrl; print(f'  skyrl={skyrl.__version__}')
++import vllm; print(f'  vllm={vllm.__version__}')
++try:
++    import vllm_ascend; print('  vllm_ascend OK')
++except: print('  vllm_ascend NOT installed')
++print('  All good!')
++"
++
++echo ""
++echo "=== Setup complete! ==="
++echo "Activate with:  source $CONDA_BASE/bin/activate $ENV_NAME"
++echo "Then source CANN: source /usr/local/Ascend/cann-8.5.0/bin/setenv.bash"
+diff --git a/skyrl-train/skyrl_train/distributed/fsdp_strategy.py b/skyrl-train/skyrl_train/distributed/fsdp_strategy.py
+index f2e12a3..9b97efb 100644
+--- a/skyrl-train/skyrl_train/distributed/fsdp_strategy.py
++++ b/skyrl-train/skyrl_train/distributed/fsdp_strategy.py
+@@ -96,14 +96,14 @@ class FSDPStrategy(DistributedStrategy):
+         random.seed(seed)
+         np.random.seed(seed)
+         torch.manual_seed(seed)
+-        torch.cuda.manual_seed_all(seed)
++        torch.npu.manual_seed_all(seed)
+ 
+     def setup_distributed(self, timeout=timedelta(minutes=30)) -> None:
+         self.set_seed(self.seed)
+ 
+         local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+         if local_rank != -1:
+-            torch.cuda.set_device(local_rank)
++            torch.npu.set_device(local_rank)
+ 
+         # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
+         self.world_size = dist.get_world_size()
+@@ -130,8 +130,8 @@ class FSDPStrategy(DistributedStrategy):
+             if optimizer is not None and self.manual_offload_optimizer and offload_optimizer:
+                 offload_fsdp_optimizer(optimizer)
+ 
+-        torch.cuda.synchronize()
+-        torch.cuda.empty_cache()
++        torch.npu.synchronize()
++        torch.npu.empty_cache()
+ 
+     def backload_to_gpu(self, model, optimizer, non_blocking=True, backload_optimizer=True, backload_model=True):
+         """Reload model weights back to GPU."""
+@@ -145,9 +145,9 @@ class FSDPStrategy(DistributedStrategy):
+             if backload_model:
+                 load_fsdp_model_to_gpu(model)
+             if optimizer is not None and self.manual_offload_optimizer and backload_optimizer:
+-                load_fsdp_optimizer(optimizer, torch.cuda.current_device())
++                load_fsdp_optimizer(optimizer, torch.npu.current_device())
+ 
+-        torch.cuda.synchronize()
++        torch.npu.synchronize()
+ 
+     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs) -> None:
+         """Perform backward pass"""
+@@ -244,7 +244,7 @@ class FSDPStrategy(DistributedStrategy):
+                 param_init_fn=init_fn,
+                 use_orig_params=False,
+                 auto_wrap_policy=wrap_policy,
+-                device_id=torch.cuda.current_device(),
++                device_id=torch.npu.current_device(),
+                 sharding_strategy=sharding_strategy,
+                 mixed_precision=mixed_precision,
+                 sync_module_states=True,
+@@ -493,7 +493,7 @@ class FSDPStrategy(DistributedStrategy):
+ 
+         # Final barrier to ensure all operations complete
+         dist.barrier()
+-        torch.cuda.synchronize()
++        torch.npu.synchronize()
+         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
+ 
+     def load_checkpoint(
+diff --git a/skyrl-train/skyrl_train/distributed/fsdp_utils.py b/skyrl-train/skyrl_train/distributed/fsdp_utils.py
+index 3d3dd29..1e897bf 100644
+--- a/skyrl-train/skyrl_train/distributed/fsdp_utils.py
++++ b/skyrl-train/skyrl_train/distributed/fsdp_utils.py
+@@ -43,8 +43,8 @@ else:
+ 
+ def init_fn(x: torch.nn.Module):
+     if torch.distributed.get_rank() != 0:
+-        x = x.to_empty(device=torch.cuda.current_device(), recurse=False)
+-        torch.cuda.empty_cache()
++        x = x.to_empty(device=torch.npu.current_device(), recurse=False)
++        torch.npu.empty_cache()
+     return x
+ 
+ 
+@@ -156,14 +156,14 @@ def offload_fsdp_model_to_cpu(model: FSDP, empty_cache: bool = True):
+         flat_param._local_shard = flat_param.data
+         assert id(flat_param._local_shard) != id(flat_param.data)
+     if empty_cache:
+-        torch.cuda.empty_cache()
++        torch.npu.empty_cache()
+ 
+ 
+ @torch.no_grad()
+ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
+     model.to("cpu", non_blocking=True)
+     if empty_cache:
+-        torch.cuda.empty_cache()
++        torch.npu.empty_cache()
+ 
+ 
+ @torch.no_grad()
+@@ -176,19 +176,19 @@ def load_fsdp_model_to_gpu(model: FSDP):
+     # lazy init FSDP model
+     _lazy_init(model, model)
+     assert model._is_root, "Only support root model loading to GPU"
+-    device_id = torch.cuda.current_device()
++    device_id = torch.npu.current_device()
+     for handle in model._all_handles:
+         if handle._offload_params:
+             continue
+         flat_param = handle.flat_param
+-        handle.flat_param_to(torch.device(f"cuda:{device_id}"), non_blocking=True)
++        handle.flat_param_to(torch.device(f"npu:{device_id}"), non_blocking=True)
+         # the following still keeps id(._local_shard) != id(.data)
+         flat_param._local_shard = flat_param.data
+ 
+ 
+ @torch.no_grad()
+ def load_fsdp2_model_to_gpu(model):
+-    device = torch.cuda.current_device()
++    device = torch.npu.current_device()
+     model.to(device, non_blocking=True)
+ 
+ 
+@@ -280,7 +280,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
+ 
+     if dist.get_rank() == 0:
+         for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
+-            full_param = full_param.detach().cuda()
++            full_param = full_param.detach().npu()
+             mesh = sharded_param.device_mesh
+             dist.broadcast(full_param, src=0)
+             sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
+@@ -294,7 +294,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
+     # We need this else to have a matching `broadcast` for all of the ranks, else we deadlock
+     else:
+         for param_name, sharded_param in meta_sharded_sd.items():
+-            full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
++            full_tensor = torch.empty(sharded_param.size(), device="npu", dtype=sharded_param.dtype)
+             mesh = sharded_param.device_mesh
+             dist.broadcast(full_tensor, src=0)
+             sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
+@@ -310,14 +310,14 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
+     model.load_state_dict(sharded_sd, assign=True)
+ 
+     # If we don't offload FSDP2 Module to CPU and then back to GPU,
+-    # it will occupy a large amount of reserved GPU memory，which can not be released using torch.cuda.empty_cache()
++    # it will occupy a large amount of reserved GPU memory，which can not be released using torch.npu.empty_cache()
+     # even if we are using cpu_offload
+     # TODO (erictang000): this requires an additional offload + backload, see if this can be avoided
+     # Credit: https://github.com/volcengine/verl/pull/1667
+     offload_fsdp2_model_to_cpu(model)
+ 
+     torch.cuda.synchronize()
+-    torch.cuda.empty_cache()
++    torch.npu.empty_cache()
+ 
+     if not cpu_offload:
+         load_fsdp2_model_to_gpu(model)
+@@ -398,10 +398,10 @@ def fsdp2_clip_grad_norm_(parameters, max_norm, norm_type=2.0, error_if_nonfinit
+ 
+ def create_device_mesh(world_size, fsdp_size):
+     if fsdp_size < 0 or fsdp_size >= world_size:
+-        device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
++        device_mesh = init_device_mesh("npu", mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
+     else:
+         device_mesh = init_device_mesh(
+-            "cuda", mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
++            "npu", mesh_shape=(world_size // fsdp_size, fsdp_size), mesh_dim_names=["ddp", "fsdp"]
+         )
+     return device_mesh
+ 
+@@ -525,7 +525,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
+                     }
+                     lora_params.update(sub_lora_params)
+                     submodule._is_root = False
+-                torch.cuda.empty_cache()
++                torch.npu.empty_cache()
+     return lora_params
+ 
+ 
+@@ -544,7 +544,7 @@ def collect_lora_params(module: FSDP) -> OrderedDict:
+                 name: param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
+                 for name, param in lora_params.items()
+             }
+-        torch.cuda.empty_cache()
++        torch.npu.empty_cache()
+     else:
+         lora_params = get_peft_model_state_dict(peft_model)
+     return lora_params
+diff --git a/skyrl-train/skyrl_train/distributed/strategy.py b/skyrl-train/skyrl_train/distributed/strategy.py
+index 0edffba..fec0c20 100644
+--- a/skyrl-train/skyrl_train/distributed/strategy.py
++++ b/skyrl-train/skyrl_train/distributed/strategy.py
+@@ -83,7 +83,7 @@ class DistributedStrategy(ABC):
+             is_cpu_tensor = data.device.type == "cpu"
+ 
+             if is_cpu_tensor:
+-                data = data.to(torch.cuda.current_device())
++                data = data.to(torch.npu.current_device())
+             if op == "mean":
+                 data /= self.world_size
+             dist.all_reduce(data, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
+@@ -103,8 +103,8 @@ class DistributedStrategy(ABC):
+                 data = torch.Tensor([data])
+             is_cpu_tensor = data.device.type == "cpu"
+ 
+-            ret = [torch.zeros_like(data).to(torch.cuda.current_device()) for _ in range(self.world_size)]
+-            dist.all_gather(ret, data.to(torch.cuda.current_device()))
++            ret = [torch.zeros_like(data).to(torch.npu.current_device()) for _ in range(self.world_size)]
++            dist.all_gather(ret, data.to(torch.npu.current_device()))
+             return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
+ 
+     def save_hf_configs(self, model_config: PretrainedConfig, hf_dir: str, tokenizer: PreTrainedTokenizer = None):
+@@ -145,8 +145,8 @@ class DistributedStrategy(ABC):
+         }
+ 
+         # Only save CUDA RNG state if CUDA is available and being used
+-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+-            rng_state["cuda"] = torch.cuda.get_rng_state()
++        if torch.npu.is_available() and torch.npu.device_count() > 0:
++            rng_state["npu"] = torch.npu.get_rng_state()
+ 
+         return rng_state
+ 
+@@ -158,5 +158,5 @@ class DistributedStrategy(ABC):
+         random.setstate(rng_state["random"])
+ 
+         # Only restore CUDA RNG state if it was saved and CUDA is available
+-        if "cuda" in rng_state and torch.cuda.is_available() and torch.cuda.device_count() > 0:
+-            torch.cuda.set_rng_state(rng_state["cuda"])
++        if "npu" in rng_state and torch.npu.is_available() and torch.npu.device_count() > 0:
++            torch.npu.set_rng_state(rng_state["npu"])
+diff --git a/skyrl-train/skyrl_train/fully_async_trainer.py b/skyrl-train/skyrl_train/fully_async_trainer.py
+index b722f98..6d6cdc0 100644
+--- a/skyrl-train/skyrl_train/fully_async_trainer.py
++++ b/skyrl-train/skyrl_train/fully_async_trainer.py
+@@ -343,8 +343,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+             self.init_weight_sync_state()
+ 
+         # sync weights to inference engines
+-        with Timer("sync_weights_to_inference_engines"):
+-            await self.async_sync_policy_weights_to_inference_engines()
++        # NOTE: Temporarily disabled for NPU debugging - initial weight sync breaks vLLM engine
++        # with Timer("sync_weights_to_inference_engines"):
++        #     await self.async_sync_policy_weights_to_inference_engines()
++        import os
++        if os.environ.get("SKYRL_SKIP_WEIGHT_SYNC", "0") == "1":
++            logger.info("Skipping initial weight sync (SKYRL_SKIP_WEIGHT_SYNC=1)")
++        else:
++            with Timer("sync_weights_to_inference_engines"):
++                await self.async_sync_policy_weights_to_inference_engines()
+ 
+         # Eval before training
+         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+@@ -407,10 +414,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+                         )
+ 
+                     # 4. After training: pause generation, sync weights, resume.
+-                    with Timer("sync_weights", self.all_timings):
+-                        await self.inference_engine_client.pause_generation()
+-                        await self.async_sync_policy_weights_to_inference_engines()
+-                        await self.inference_engine_client.resume_generation()
++                    if os.environ.get("SKYRL_SKIP_WEIGHT_SYNC", "0") == "1":
++                        logger.info("Skipping weight sync (SKYRL_SKIP_WEIGHT_SYNC=1)")
++                    else:
++                        with Timer("sync_weights", self.all_timings):
++                            await self.inference_engine_client.pause_generation()
++                            await self.async_sync_policy_weights_to_inference_engines()
++                            await self.inference_engine_client.resume_generation()
+ 
+                 # 5. Set logs for this training step.
+                 logger.info(status)
+diff --git a/skyrl-train/skyrl_train/inference_engines/vllm/vllm_engine.py b/skyrl-train/skyrl_train/inference_engines/vllm/vllm_engine.py
+index 8a93271..e6b3ad4 100644
+--- a/skyrl-train/skyrl_train/inference_engines/vllm/vllm_engine.py
++++ b/skyrl-train/skyrl_train/inference_engines/vllm/vllm_engine.py
+@@ -78,7 +78,7 @@ class WorkerWrap:
+         rank_offset,
+         world_size,
+         group_name,
+-        backend="nccl",
++        backend="hccl",
+         override_existing: bool = False,
+     ):
+         """Init torch process group for model weights update"""
+@@ -118,7 +118,7 @@ class WorkerWrap:
+         for name, dtype, shape in zip(names, dtypes, shapes):
+             dtype = str_to_torch_dtype(dtype)
+             assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+-            weight = torch.empty(shape, dtype=dtype, device="cuda")
++            weight = torch.empty(shape, dtype=dtype, device="npu")
+             torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+             weight_list.append((name, weight))
+ 
+@@ -146,8 +146,8 @@ class WorkerWrap:
+             assert len(sizes) == len(names), "sizes must be provided for packed weight update"
+             assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
+ 
+-            device = torch.cuda.current_device()
+-            props = torch.cuda.get_device_properties(device)
++            device = torch.npu.current_device()
++            props = torch.npu.get_device_properties(device)
+             physical_gpu_id = str(props.uuid)
+ 
+             handle = ipc_handles[0][physical_gpu_id]
+@@ -165,8 +165,8 @@ class WorkerWrap:
+             for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
+ 
+                 dtype = str_to_torch_dtype(dtype)
+-                device = torch.cuda.current_device()
+-                props = torch.cuda.get_device_properties(device)
++                device = torch.npu.current_device()
++                props = torch.npu.get_device_properties(device)
+                 physical_gpu_id = str(props.uuid)
+ 
+                 assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
+diff --git a/skyrl-train/skyrl_train/model_wrapper.py b/skyrl-train/skyrl_train/model_wrapper.py
+index 028cb86..206b6ac 100644
+--- a/skyrl-train/skyrl_train/model_wrapper.py
++++ b/skyrl-train/skyrl_train/model_wrapper.py
+@@ -17,7 +17,11 @@ from transformers.integrations.deepspeed import HfDeepSpeedConfig
+ import numpy as np
+ from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
+ from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
+-from flash_attn.bert_padding import pad_input, unpad_input
++try:
++    from flash_attn.bert_padding import pad_input, unpad_input
++except ImportError:
++    pad_input = None
++    unpad_input = None
+ from packaging.version import Version
+ 
+ 
+@@ -70,7 +74,7 @@ class HFModelWrapper(nn.Module):
+         super().__init__()
+         self.temperature = temperature
+         self.sequence_parallel_size = sequence_parallel_size
+-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
++        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
+         self.use_sample_packing = use_sample_packing
+         # packing samples using Flash Attention 2
+         if use_sample_packing:
+diff --git a/skyrl-train/skyrl_train/utils/utils.py b/skyrl-train/skyrl_train/utils/utils.py
+index 23ea8e0..6d492d5 100644
+--- a/skyrl-train/skyrl_train/utils/utils.py
++++ b/skyrl-train/skyrl_train/utils/utils.py
+@@ -568,6 +568,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
+         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
+         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
+ 
++    # Forward proxy settings to Ray workers (needed for wandb etc.)
++    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "no_proxy", "NO_PROXY"):
++        if os.environ.get(proxy_var):
++            env_vars[proxy_var] = os.environ[proxy_var]
++
+     return env_vars
+ 
+ 
+diff --git a/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py b/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py
+index 41888cd..722604a 100644
+--- a/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py
++++ b/skyrl-train/skyrl_train/workers/fsdp/fsdp_worker.py
+@@ -30,7 +30,7 @@ from skyrl_train.workers.worker import (
+ 
+ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
+-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
++        self._set_numa_affinity(torch.distributed.get_rank() % torch.npu.device_count())
+         self.strategy.offload_to_cpu(
+             self.model, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
+         )
+@@ -142,7 +142,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+             # clear prefix cache
+             cache_reset_task = inference_engine_client.reset_prefix_cache()
+ 
+-        torch.cuda.empty_cache()
++        torch.npu.empty_cache()
+         if fsdp_version(self.model.model) == 1:
+             FSDP.set_state_dict_type(
+                 self.model.model,
+@@ -182,7 +182,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+                 # broadcast
+                 def gather_and_broadcast(param):
+                     # For FSDP, gather parameter and broadcast to all InferenceEngines by rank 0
+-                    device = torch.cuda.current_device()
++                    device = torch.npu.current_device()
+                     param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                     # cast to generator dtype
+                     param = param.to(generator_dtype)
+@@ -219,7 +219,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+ 
+                     from torch.multiprocessing.reductions import reduce_tensor
+ 
+-                    device = torch.cuda.current_device()
++                    device = torch.npu.current_device()
+                     param = param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param
+                     param = param.to(generator_dtype)
+                     weight = param.detach().contiguous()
+@@ -269,7 +269,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+ 
+         if cache_reset_task is not None:
+             await cache_reset_task
+-        torch.cuda.empty_cache()
++        torch.npu.empty_cache()
+         torch.distributed.barrier()
+ 
+     def get_weight_statistics(self):
+@@ -297,7 +297,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
+ 
+ class FSDPCriticWorkerBase(CriticWorkerBase):
+     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
+-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
++        self._set_numa_affinity(torch.distributed.get_rank() % torch.npu.device_count())
+         self.strategy.offload_to_cpu(
+             self.model, self.optimizer, pin_memory, non_blocking, offload_optimizer, offload_model
+         )
+@@ -374,7 +374,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
+ 
+ class FSDPRefWorkerBase(RefWorkerBase):
+     def offload_to_cpu(self, pin_memory=True, non_blocking=True, **kwargs):
+-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
++        self._set_numa_affinity(torch.distributed.get_rank() % torch.npu.device_count())
+         self.strategy.offload_to_cpu(self.model, None, pin_memory, non_blocking)
+ 
+     def backload_to_gpu(self, non_blocking=True, **kwargs):
+diff --git a/skyrl-train/skyrl_train/workers/worker.py b/skyrl-train/skyrl_train/workers/worker.py
+index cf42058..2a22aa1 100644
+--- a/skyrl-train/skyrl_train/workers/worker.py
++++ b/skyrl-train/skyrl_train/workers/worker.py
+@@ -81,7 +81,7 @@ class DistributedTorchRayActor:
+         if not torch.distributed.is_initialized():
+             # Default torch dist pg init timeout is 10 minutes (600 seconds)
+             torch.distributed.init_process_group(
+-                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
++                backend="hccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+             )
+ 
+         # setup device mesh
+@@ -414,7 +414,7 @@ class PPORayActorGroup:
+                 reordered_bundle_indices = get_reordered_bundle_indices(pg)
+ 
+         if self._num_gpus_per_node > 1 and pg is None:
+-            bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
++            bundles = [{"NPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
+             if self._resources:
+                 resources_name = list(self._resources.keys())[0]
+                 for i in range(len(bundles)):
+-- 
+2.34.1
+

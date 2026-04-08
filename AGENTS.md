@@ -41,3 +41,13 @@ The Sovereign Architect has access to generate commands for the following tools,
 ## 6. Human Oversight
 
 The Human Contributor is the final authority on all architectural decisions and code merges. The act of committing code is the formal signal of review and approval. The Architect's role is to assist and accelerate the human's work, not to operate with full autonomy.
+
+
+### Context Hub（认知蒸馏）
+- 对话结束时（或用户说"收工"/"结束"），按 `.context-hub/SCHEMA.md` 格式提取 1-3 条 observation
+- 写入 `.context-hub/observations/<project>/YYYY-MM-DD.md`（把 `<project>` 替换成当前项目名，如 `synzh`）
+- 只记录有判断含量的内容（做了什么决策、为什么），不记录纯执行动作
+- 优先记录项目本身的判断（技术选择、质量策略、架构决策等）；关于工具/流程/基础设施的 meta 观察每天最多 1 条
+- 主动关注 [失败] 类 observation——翻车、回退、预期落空的判断对长期蒸馏价值最高，不要只记"做对了什么"
+- 做判断时可参考 `.context-hub/axioms/axioms.md` 中的原则（只读，不要修改）
+- 写完后提醒用户运行 `cd .context-hub && bash sync.sh` 同步

@@ -1,6 +1,6 @@
 # CodeScout NPU (Ascend) 适配状态文档
 
-> 最后更新: 2026-03-27
+> 最后更新: 2026-03-30
 
 ## 1. 目标
 
@@ -136,7 +136,7 @@ generator.weight_sync_backend=hccl  # HCCL 替代 NCCL
 | Async trainer 循环 | ✅ | generation buffer → policy train → step progress 全通 |
 | Agent 初始化 | ✅ | `_initialized` 修复后不再报错 |
 | Weight sync (HCCL broadcast) | ⚠️ | broadcast 本身完成，但之后 vLLM HTTP 503 |
-| vLLM HTTP endpoint serving | ❌ | 在 CANN 8.5 下所有 rollout 返回 503 |
+| vLLM HTTP endpoint serving | ✅ | CANN 8.3 下正常工作（CANN 8.5 下 503） |
 
 ## 5. Attention Benchmark 结果
 
@@ -460,3 +460,130 @@ for relpath, replacements in patches.items():
     print(f"  {relpath}: {changed}/{len(replacements)}")
 print("Done!")
 ```
+
+
+## 11. CANN 8.3 环境搭建记录（2026-03-30）
+
+### 机器信息
+
+| 项目 | 值 |
+|------|-----|
+| 机器 | npu-lych-rl-server-6-server-0 |
+| OS | Ubuntu 22.04.5 LTS (aarch64) |
+| CANN | 8.3.RC1 (8.3.0.1.200) |
+| NPU | 8 × Ascend 910, 64GB HBM each |
+| conda | /sharedata/liyuchen/miniforge3 |
+
+### 环境：`codescout-cann83`
+
+| 组件 | 版本 | 安装方式 |
+|------|------|----------|
+| Python | 3.12.13 | conda create |
+| torch | 2.8.0+cpu | `pip install torch==2.8.0 --no-deps` |
+| torch_npu | 2.8.0.post2 | `pip install torch-npu==2.8.0.post2 --no-deps` |
+| vllm | 0.11.0 | `pip install vllm==0.11.0 --no-deps` |
+| vllm-ascend | 0.11.0rc2.dev (from source) | 从 v0.11.0rc1 tag 源码构建（见下方） |
+| ray | 2.51.1 | pip |
+| skyrl-train | 0.2.0 (editable) | `pip install -e skyrl-train/ --no-deps` |
+| skyrl-gym | 0.1.1 (editable) | `pip install -e skyrl-gym/ --no-deps` |
+| openhands-sdk | 1.15.0 | `pip install --no-deps --ignore-requires-python` |
+
+### vllm-ascend 源码构建注意事项
+
+PyPI 上的 vllm-ascend 0.11.0rc1 是 source distribution，build-requires 写死了
+`torch==2.7.1` + `torch-npu==2.7.1`，与我们的 torch 2.8 不兼容。需要从源码构建：
+
+```bash
+git clone --depth 1 --branch v0.11.0rc1 https://github.com/vllm-project/vllm-ascend.git /tmp/vllm-ascend-src
+
+# 修改 pyproject.toml: torch==2.7.1 → 2.8.0, torch-npu==2.7.1 → 2.8.0.post2, numpy<2.0.0 → numpy
+sed -i 's/"torch-npu==2.7.1"/"torch-npu==2.8.0.post2"/' /tmp/vllm-ascend-src/pyproject.toml
+sed -i 's/"torch==2.7.1"/"torch==2.8.0"/' /tmp/vllm-ascend-src/pyproject.toml
+sed -i 's/"numpy<2.0.0"/"numpy"/' /tmp/vllm-ascend-src/pyproject.toml
+
+# 修改 CMakeLists.txt: 放宽 torch 版本检查 + 添加 Python 3.12 支持
+sed -i 's/VERSION_EQUAL "2.7.1"/VERSION_EQUAL "2.8.0"/' /tmp/vllm-ascend-src/CMakeLists.txt
+sed -i 's/"3.9" "3.10" "3.11"/"3.9" "3.10" "3.11" "3.12"/' /tmp/vllm-ascend-src/CMakeLists.txt
+# 去掉 torch version 字符串中的 +cpu 后缀
+sed -i "s/import torch; print(torch.__version__)/import torch; print(torch.__version__.split('+')[0])/" /tmp/vllm-ascend-src/CMakeLists.txt
+
+# 修改 setup.py: 修复 python3 路径（系统上可能没有 python3）
+# 在 torch_npu_command 行把 python3 替换为 conda env 的 python 绝对路径
+# 在 TORCH_NPU_PATH cmake arg 后添加: cmake_args += [f"-DASCEND_PYTHON_EXECUTABLE={sys.executable}"]
+
+# 构建安装
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 pip install /tmp/vllm-ascend-src/ --no-deps --no-build-isolation
+```
+
+### 关键安装陷阱
+
+1. **torch 版本被覆盖**: `pip install torch-npu` 不加 `--no-deps` 会拉 CUDA 版本的 torch 2.11，
+   覆盖掉 torch 2.8。所有 torch 相关包必须用 `--no-deps` 安装。
+
+2. **`~orch` 残留**: pip 安装失败时会留下 `~orch`, `~orch-2.8.0.dist-info` 等残留目录，
+   需要手动 `rm -rf` 清理。
+
+3. **ASCEND_PYTHON_EXECUTABLE**: CANN 的 CMake 工具链默认用 `python3`，
+   但容器/机器上可能没有 `python3` 命令，需要显式设置。
+
+### 已验证通过的环节（CANN 8.3）
+
+| 环节 | 状态 | 说明 |
+|------|------|------|
+| torch_npu tensor 运算 | ✅ | 8 张 NPU 全部识别，matmul 通过 |
+| NPU monkey-patch 自动加载 | ✅ | torch.cuda.* 透明代理到 torch.npu.* |
+| HCCL + DeviceMesh | ✅ | init_process_group(backend='hccl') + init_device_mesh('npu') |
+| vLLM import + ascend 插件 | ✅ | vllm_ascend 插件自动激活 |
+| vLLM 离线推理 | ✅ | Qwen3-8B, enforce_eager=True, bf16, max_model_len=512 |
+| vLLM HTTP serving | ✅ | `/health` 200, `/v1/completions` 200, `/v1/chat/completions` 200, 连续 5 请求全部 200。**CANN 8.5 的 503 问题在 8.3 上不存在。** |
+
+### 下一步
+
+1. **vLLM HTTP serving 测试**: ✅ 已通过。CANN 8.3 下 HTTP serving 完全正常，
+   `/health`、`/v1/completions`、`/v1/chat/completions` 全部返回 200。
+
+2. **完整训练循环测试**: 用小模型（如果有 Qwen3-4B）或 Qwen3-8B 跑一个 mini 训练循环，
+   验证 weight sync (HCCL broadcast) + vLLM HTTP serving 在训练循环中的稳定性。
+
+3. **下载 Qwen3-4B**: 当前机器只有 Qwen3-8B 和 32B，codescout 训练脚本默认用 4B。
+| vLLM HTTP serving | ✅ | `/health` 200, `/v1/completions` 200, `/v1/chat/completions` 200, 连续 5 请求全部 200。**CANN 8.5 的 503 问题在 8.3 上不存在。** |
+| 完整训练循环 (Qwen3-4B) | ✅ | 3 个 step 全部完成，weight sync + policy train + generation 全通。详见下方。 |
+
+### 训练循环测试结果（2026-03-30）
+
+使用 `codescout/scripts/test_training_npu.sh` 跑 Qwen3-4B-Instruct-2507，
+2 个 inference engine + 2 个 training engine，batch_size=2，max_model_len=4096（测试用小值）。
+
+| Step | policy_train | run_training | avg_response_length | avg_final_rewards |
+|------|-------------|-------------|---------------------|-------------------|
+| 1 | 14.74s | 16.92s | 342 | 0.0 |
+| 2 | 12.82s | 13.99s | 196 | 0.0 |
+| 3 | 13.05s | 14.32s | 548 | 0.0 |
+
+reward 为 0 是因为 max_model_len=4096 太小，很多 prompt 超过 4096 token 被 vLLM 拒绝。
+正式训练用 max_model_len=32768 即可。
+
+已验证通过的完整链路：
+- Ray 启动 + NPU 资源调度 ✅
+- 2 × AsyncVLLMInferenceEngine 启动 + 模型加载 ✅
+- FSDPPolicyWorker 启动 + 模型加载 ✅
+- weight sync 初始化 (HCCL) ✅ (4.78s)
+- generation (agent conversation via HTTP) ✅
+- fwd_logprobs_values_reward ✅
+- compute_advantages_and_returns ✅
+- policy_train (FSDP2 + bf16 + cpu_offload) ✅
+- 多 step 连续训练稳定 ✅
+
+### 下一步
+
+1. **正式训练**: 用完整参数跑（max_model_len=32768, 4 infer + 4 train, batch_size=4）
+2. **监控 reward**: 确认 agent 在 32768 context 下能正常工作，reward > 0
+3. **长时间稳定性**: 跑 50+ step 确认无 OOM、无 HCCL timeout
+
+### 环境搭建中的额外修复
+
+1. 删除了 `SkyRL/skyrl_train/` 残留 shim 目录（从 main 分支遗留，会覆盖 editable install）
+2. 从 main 分支 checkout 了 `npu_support/` 目录到 codescout-npu 分支
+3. 安装了 `uvloop`（vLLM HTTP server 依赖）
+4. 训练脚本 `run_async_training_npu.sh` 更新了 CANN setenv 路径和 conda 环境名
+5. 新增了 `test_training_npu.sh` 精简测试脚本

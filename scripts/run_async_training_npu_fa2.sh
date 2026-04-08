@@ -74,7 +74,6 @@ export RAY_worker_register_timeout_seconds=600
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTHONUNBUFFERED=1
 export SKYRL_PYTHONPATH_EXPORT=1
-export WANDB_INIT_TIMEOUT=300
 
 # Network proxy — disabled because proxy is broken and blocks git clone in agent testbed.
 # If wandb needs proxy, use WANDB_MODE=offline instead.
@@ -202,7 +201,7 @@ $PYTHON -m src.train_npu \
   +generator.prompts.system_prompt="templates/system_prompt_custom_finish.j2" \
   +generator.prompts.user_prompt="templates/file_module_custom_finish.j2" \
   +generator.engine_init_kwargs.disable_cascade_attn=true \
-  trainer.flash_attn=false \
+  trainer.flash_attn=true \
   trainer.epochs=1 \
   trainer.eval_batch_size=100 \
   trainer.eval_before_train=false \

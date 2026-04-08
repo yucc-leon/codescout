@@ -1,3 +1,8 @@
+This fork contains an experimental Ascend NPU adaptation of CodeScout. It is intended as a reproducible reference for running CodeScout training workflows in Ascend-based environments, using a small set of patches on top of a specific SkyRL revision together with a few CodeScout-side configuration and entry-point changes. 
+
+It is not an official upstream support branch, but just a practical adaptation maintained for users working in similar hardware settings.
+
+---
 <h1 align="center"> CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents</h1>
 
 <p align="center">
@@ -9,7 +14,7 @@
 	</a>
 </p>
 
-
+---
 This repository contains the source code for the paper **CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents**
 
 🏆 CodeScout achieves open-source SOTA code localization performance outperforming 8-18x larger base and post-trained LLMs and narrows the gap with frontier closed-source models.
