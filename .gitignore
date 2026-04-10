@@ -181,4 +181,15 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 swebench_repos/
-setup.txt
+setup.txtscripts/archive/
+docs/archive/
+logs/
+wandb/
+outputs/
+
+LOCAL_RUN.md
+.nfs*
+.context-hub/
+scripts/archive/
+docs/archive/
+scripts/cluster_entrypoint.sh
