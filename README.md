@@ -125,23 +125,21 @@ This fork has been adapted to run CodeScout RL training on Huawei Ascend 910 NPU
 # 1. Clone repos
 git clone https://github.com/yucc-leon/codescout.git && cd codescout && git checkout npu-ascend-adapt
 git clone https://github.com/yucc-leon/SkyRL.git ../SkyRL && cd ../SkyRL && git checkout codescout-npu
+cd ../codescout
 
 # 2. Setup environment (after CANN 8.3 is installed)
-bash codescout/scripts/setup_ascend_env.sh
+bash scripts/setup_ascend_env.sh
 
-# 3. Install SkyRL (editable, no-deps)
-pip install -e SkyRL/skyrl-train/ --no-deps --no-build-isolation
-pip install -e SkyRL/skyrl-gym/ --no-deps --no-build-isolation
+# 3. Prepare repo cache (one-time, needs GitHub access)
+python scripts/precache_repos.py \
+    --data data/swe_smith/train.parquet \
+    --cache /path/to/repo_cache
 
-# 4. Install NPU monkey-patch
-SITE=$(python -c "import site; print(site.getsitepackages()[0])")
-cp -r SkyRL/npu_support $SITE/npu_support
-cp SkyRL/npu_support/npu_autoload.pth $SITE/
-
-# 5. Launch training (SP=2, 8×NPU)
-bash codescout/scripts/run_async_training_npu_sp2.sh \
+# 4. Launch training (SP=2, 8×NPU)
+export REPO_CACHE=/path/to/repo_cache
+bash scripts/run_async_training_npu_sp2.sh \
   -m /path/to/Qwen3-4B-Instruct-2507 \
-  -d ./codescout/data/swe_smith \
+  -d ./data/swe_smith \
   -s /path/to/ckpts \
   -r my-npu-run
 ```

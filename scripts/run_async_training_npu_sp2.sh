@@ -73,25 +73,25 @@ export RAY_DEDUP_LOGS=0
 export RAY_worker_register_timeout_seconds=600
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTHONUNBUFFERED=1
+# Prevent triton namespace conflict in .pth auto-load (affects Ray workers)
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export SKYRL_PYTHONPATH_EXPORT=1
 export WANDB_INIT_TIMEOUT=300
 
-# Network proxy — uncomment and configure if wandb or git needs proxy access.
-# These will be forwarded to Ray workers automatically by SkyRL.
-# export http_proxy="http://user:password@proxy-host:port"
-# export https_proxy="$http_proxy"
-# export HTTP_PROXY="$http_proxy"
-# export HTTPS_PROXY="$https_proxy"
-# export ALL_PROXY="$http_proxy"
-# export no_proxy="localhost,127.0.0.1,0.0.0.0"
-# export NO_PROXY="$no_proxy"
-# export HTTP_PROXY="$http_proxy"
-# export HTTPS_PROXY="$https_proxy"
-# export ALL_PROXY="$http_proxy"
-# Exclude local addresses from proxy so vLLM HTTP endpoints are accessed directly
-# export no_proxy="localhost,127.0.0.1,0.0.0.0"
-# export NO_PROXY="$no_proxy"
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true
+# Repo cache for fast local clone (set by cluster entrypoint)
+export REPO_CACHE="${REPO_CACHE:-}"
+
+# Network proxy — preserve if already set (e.g. by cluster entrypoint).
+# Git clone in rollout workers needs proxy to reach GitHub.
+# vLLM HTTP endpoints (localhost) must NOT go through proxy.
+if [ -n "${http_proxy:-}" ] || [ -n "${ALL_PROXY:-}" ]; then
+    export no_proxy="localhost,127.0.0.1,0.0.0.0,$(hostname -i 2>/dev/null || echo '')"
+    export NO_PROXY="$no_proxy"
+    echo "Proxy preserved: ${http_proxy:-${ALL_PROXY:-}}, no_proxy=$no_proxy"
+else
+    # No proxy set — ensure clean state (dev machine / direct internet)
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY 2>/dev/null || true
+fi
 export SKYRL_LD_LIBRARY_PATH_EXPORT=1
 
 # Cache dirs (from ablation script — avoid polluting home dir)
