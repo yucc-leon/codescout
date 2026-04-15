@@ -280,7 +280,21 @@ git config --global http.lowSpeedLimit 1000
 git config --global http.lowSpeedTime 30
 
 # ============================================================================
-# Step 10: Verify
+# Step 10: Repo cache (bare clone of all training repos for fast rollout)
+# ============================================================================
+REPO_CACHE="${REPO_CACHE:-$WORKSPACE/repo_cache}"
+if [ ! -d "$REPO_CACHE" ] || [ "$(ls "$REPO_CACHE" 2>/dev/null | wc -l)" -lt 100 ]; then
+    log "Building repo cache at $REPO_CACHE ..."
+    $PYTHON "$CODESCOUT_ROOT/scripts/precache_repos.py" \
+        --data "$CODESCOUT_ROOT/data/swe_smith/train.parquet" \
+        --cache "$REPO_CACHE"
+    log "Repo cache ready: $(ls "$REPO_CACHE" | wc -l) repos"
+else
+    log "Repo cache exists: $REPO_CACHE ($(ls "$REPO_CACHE" | wc -l) repos)"
+fi
+
+# ============================================================================
+# Step 11: Verify
 # ============================================================================
 log "Running verification..."
 $PYTHON -c "
@@ -322,9 +336,16 @@ print(f'  NPUs: {torch.npu.device_count()}')
 log "============================================"
 log "Setup complete! To start training:"
 log ""
+log "  # Step 1: Prepare repo cache (one-time, needs GitHub access)"
 log "  export PATH=$CONDA_BASE/envs/$ENV_NAME/bin:\$PATH"
 log "  cd $WORKSPACE"
-log "  bash codescout/scripts/run_async_training_npu.sh \\"
+log "  python codescout/scripts/precache_repos.py \\"
+log "      --data codescout/data/swe_smith/train.parquet \\"
+log "      --cache \$WORKSPACE/repo_cache"
+log ""
+log "  # Step 2: Launch training"
+log "  export REPO_CACHE=\$WORKSPACE/repo_cache"
+log "  bash codescout/scripts/run_async_training_npu_sp2.sh \\"
 log "    -m /path/to/Qwen3-4B-Instruct-2507 \\"
 log "    -d ./codescout/data/swe_smith \\"
 log "    -s /path/to/ckpts \\"
