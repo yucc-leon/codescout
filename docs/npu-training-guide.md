@@ -28,7 +28,7 @@
 
 ```bash
 # 1. Clone repos
-git clone https://github.com/yucc-leon/codescout.git && cd codescout && git checkout npu-ascend-adapt
+git clone https://github.com/yucc-leon/codescout.git && cd codescout
 git clone https://github.com/yucc-leon/SkyRL.git ../SkyRL && cd ../SkyRL && git checkout codescout-npu
 cd ../codescout
 
