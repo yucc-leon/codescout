@@ -13,12 +13,10 @@ annotated-doc==0.0.4
 annotated-types==0.7.0
 antlr4-python3-runtime==4.9.3
 anyio==4.13.0
-asc_opc_tool @ file:///root/selfgz96235205/compiler/lib64/asc_opc_tool-0.1.0-py3-none-any.whl#sha256=9873a1882932875dc651dac3294a738c7340c288070c4b89cf652ec93c1628b4
 astor==0.8.1
 asttokens==3.0.1
 attrs==26.1.0
 Authlib==1.6.9
-auto_tune @ file:///root/selfgz96235205/compiler/lib64/auto_tune-0.1.0-py3-none-any.whl#sha256=276aad11a9fc0e06a1a77cbd82d2953ea987251758424d717d287708f4016b0d
 bashlex==0.18
 beartype==0.22.9
 binaryornot==0.6.0
@@ -37,7 +35,6 @@ colorama==0.4.6
 compressed-tensors==0.14.0.1
 cryptography==46.0.6
 cyclopts==4.10.1
-dataflow @ file:///root/selfgz96235205/compiler/lib64/dataflow-0.0.1-py3-none-any.whl#sha256=e056c5beec9ce32ed2e5f66784af30b9e9ba251b08b41d7fb6554f2ddc0ef2d4
 datasets==4.8.4
 decorator==5.2.1
 deprecation==2.1.0
@@ -79,8 +76,6 @@ grpc-google-iam-v1==0.14.3
 grpcio==1.78.0
 grpcio-status==1.78.0
 h11==0.16.0
-hccl @ file:///root/selfgz2712118142/hccl/lib64/hccl-0.1.0-py3-none-any.whl#sha256=4cc4d4519e1370486f691ab38b9267ea24cf007ce5853f67d1b922b06fb0f74d
-hccl_parser @ file:///usr/local/Ascend/ascend-toolkit/8.3.RC1/toolkit/tools/hccl_parser-0.1-py3-none-any.whl#sha256=e378185134d1d281536b36a9a8567092553d5c2bf1700ea53cc95b58ed5e646e
 hf-xet==1.4.2
 hf_transfer==0.1.9
 httpcore==1.0.9
@@ -111,8 +106,6 @@ keyring==25.7.0
 lark==1.3.1
 libtmux==0.55.0
 litellm==1.82.6
-llm_datadist @ file:///root/selfgz96235205/compiler/lib64/llm_datadist-0.0.1-py3-none-any.whl#sha256=fb401ecb627245d9563c3bdde2da327bf1434ef5f033504b8422c92f397d18df
-llm_datadist_v1 @ file:///root/selfgz96235205/compiler/lib64/llm_datadist_v1-0.0.1-py3-none-any.whl#sha256=624abc40cf79eb1e9bb15cfff070ab8a0bf579afb473541282121af236d1ae18
 llvmlite==0.46.0
 lmnr==0.7.42
 loguru==0.7.3
@@ -129,7 +122,6 @@ more-itertools==10.8.0
 mpmath==1.3.0
 msgpack==1.1.2
 msgspec==0.20.0
-msobjdump @ file:///usr/local/Ascend/ascend-toolkit/8.3.RC1/toolkit/tools/msobjdump-0.1.0-py3-none-any.whl#sha256=140a42aeda76a7a64947e1668c0b9e4f1fbd0bc851cd8aa3488908a3a16e1d05
 multidict==6.7.1
 multiprocess==0.70.19
 networkx==3.6.1
@@ -138,17 +130,9 @@ numba==0.64.0
 numpy==2.3.5
 oauthlib==3.3.1
 omegaconf==2.3.0
-op_compile_tool @ file:///root/selfgz96235205/compiler/lib64/op_compile_tool-0.1.0-py3-none-any.whl#sha256=1e6287fdabd1dd4d39d7f4e6e86cc26335d75dab59443c74b9653bfa5cbcc702
-op_gen @ file:///usr/local/Ascend/ascend-toolkit/8.3.RC1/toolkit/tools/op_gen-0.1-py3-none-any.whl#sha256=b3e21ccc57b7d7249c5f1421a37e081ae40851209542e9a515b77c44d2e6568d
-op_test_frame @ file:///usr/local/Ascend/ascend-toolkit/8.3.RC1/toolkit/tools/op_test_frame-0.1-py3-none-any.whl#sha256=71df6227bb65464d7b47c855f17ee054700d88a04756b79b7f94c940d1b9ad4c
-opc_tool @ file:///root/selfgz96235205/compiler/lib64/opc_tool-0.1.0-py3-none-any.whl#sha256=04ea0138dc6c0ef62341395ffadcb8f123819b21b520f0ce743b5a283743fbe0
 openai==2.30.0
 openai-harmony==0.0.8
 openapi-pydantic==0.5.1
-openhands-agent-server @ git+https://github.com/OpenHands/software-agent-sdk.git@85ecfd9333d2d2cc4404dd460fd38868d9b978e2#subdirectory=openhands-agent-server
-openhands-sdk @ git+https://github.com/OpenHands/software-agent-sdk.git@85ecfd9333d2d2cc4404dd460fd38868d9b978e2#subdirectory=openhands-sdk
-openhands-tools @ git+https://github.com/OpenHands/software-agent-sdk.git@85ecfd9333d2d2cc4404dd460fd38868d9b978e2#subdirectory=openhands-tools
-openhands-workspace @ git+https://github.com/OpenHands/software-agent-sdk.git@85ecfd9333d2d2cc4404dd460fd38868d9b978e2#subdirectory=openhands-workspace
 opentelemetry-api==1.40.0
 opentelemetry-exporter-otlp-proto-common==1.40.0
 opentelemetry-exporter-otlp-proto-grpc==1.40.0
@@ -160,7 +144,6 @@ opentelemetry-sdk==1.40.0
 opentelemetry-semantic-conventions==0.61b0
 opentelemetry-semantic-conventions-ai==0.4.13
 orjson==3.11.7
-packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1769093650/work
 pandas==3.0.1
 parso==0.8.6
 partial-json-parser==0.2.1.1.post7
@@ -217,7 +200,6 @@ rich-rst==1.3.2
 rpds-py==0.30.0
 s3fs==2026.2.0
 safetensors==0.7.0
-schedule_search @ file:///root/selfgz96235205/compiler/lib64/schedule_search-0.1.0-py3-none-any.whl#sha256=a6d657cc64ce2f4db12b85f67d8fec4862e54bc1d02e1b0fb04166e073503a50
 scipy==1.17.1
 SecretStorage==3.5.0
 sentencepiece==0.2.1
@@ -225,10 +207,7 @@ sentry-sdk==2.56.0
 setproctitle==1.3.7
 setuptools==75.9.1
 setuptools-scm==10.0.3
-show_kernel_debug_data @ file:///usr/local/Ascend/ascend-toolkit/8.3.RC1/toolkit/tools/show_kernel_debug_data-0.1.0-py3-none-any.whl#sha256=7d1384b717aec1ce3410d7550e8fb5a9fbfdacef84126d796f65a0a0cce3eea9
 six==1.17.0
--e git+https://github.com/yucc-leon/SkyRL@8b15cd1f70d0acec61dc64d890fc65a21ac271b1#egg=skyrl_gym&subdirectory=skyrl-gym
--e git+https://github.com/yucc-leon/SkyRL@8b15cd1f70d0acec61dc64d890fc65a21ac271b1#egg=skyrl_train&subdirectory=skyrl-train
 smmap==5.0.3
 sniffio==1.3.1
 sortedcontainers==2.4.0
@@ -238,7 +217,6 @@ stack-data==0.6.3
 starlette==0.52.1
 swebench==4.1.0
 sympy==1.14.0
-te @ file:///root/selfgz96235205/compiler/lib64/te-0.4.0-py3-none-any.whl#sha256=2ef00a2c2c50269be2bc73b3979b6b38a47568e9af9710a95a95c7c1982f5eef
 tenacity==9.1.4
 tensorboard==2.20.0
 tensorboard-data-server==0.7.2
@@ -246,8 +224,6 @@ tensordict==0.11.0
 tiktoken==0.12.0
 tokenizers==0.22.2
 tom-swe==1.0.3
-torch==2.8.0
-torch_npu==2.8.0.post2
 torchdata==0.11.0
 tqdm==4.67.3
 traitlets==5.14.3
@@ -260,8 +236,6 @@ urllib3==2.6.3
 uvicorn==0.42.0
 uvloop==0.22.1
 vcs-versioning==1.0.1
-vllm==0.11.0
-vllm_ascend @ file:///tmp/vllm-ascend-src
 wadler_lindig==0.1.7
 wandb==0.25.1
 watchfiles==1.1.1

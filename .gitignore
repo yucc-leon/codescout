@@ -186,10 +186,3 @@ docs/archive/
 logs/
 wandb/
 outputs/
-
-LOCAL_RUN.md
-.nfs*
-.context-hub/
-scripts/archive/
-docs/archive/
-scripts/cluster_entrypoint.sh
