@@ -1,7 +1,7 @@
 """Pre-clone all repos needed by swe_smith training data into a local bare cache.
 
 Usage:
-    python scripts/precache_repos.py --data ./data/swe_smith/train.parquet --cache /sharedata/repo_cache
+    python scripts/precache_repos.py --data ./data/swe_smith/train.parquet --cache /path/to/repo_cache
 
 Each repo is stored as a bare git repo at <cache>/<owner>__<repo>.git
 Rollout workers can then clone from local cache instead of GitHub.
