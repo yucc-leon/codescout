@@ -119,3 +119,4 @@ class CustomAgent(Agent):
 
         # Store tools in a dict for easy access
         self._tools = {tool.name: tool for tool in tools}
+        self._initialized = True

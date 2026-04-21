@@ -1,3 +1,8 @@
+This fork contains an experimental Ascend NPU adaptation of CodeScout. See [Ascend NPU Training Guide / 昇腾 NPU 训练指南](#-ascend-npu-training--昇腾-npu-训练) below.
+
+本 fork 包含 CodeScout 的昇腾 NPU 适配。详见下方 [昇腾 NPU 训练指南](#-ascend-npu-training--昇腾-npu-训练)。
+
+---
 <h1 align="center"> CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents</h1>
 
 <p align="center">
@@ -9,7 +14,7 @@
 	</a>
 </p>
 
-
+---
 This repository contains the source code for the paper **CodeScout: An Effective Recipe for Reinforcement Learning of Code Search Agents**
 
 🏆 CodeScout achieves open-source SOTA code localization performance outperforming 8-18x larger base and post-trained LLMs and narrows the gap with frontier closed-source models.
@@ -94,6 +99,74 @@ Refer to [this README](./README_Training.md) for detailed instructions on reprod
 ### 📊 Evaluation Setup
 
 All our evaluation experiments have been performed using this [fork](https://github.com/adityasoni9998/benchmarks/tree/agentic_code_search) of the [OpenHands benchmarks repository](https://github.com/OpenHands/benchmarks). The repository has detailed instructions on reproducing our evaluation results.
+
+---
+
+## 🔧 Ascend NPU Training / 昇腾 NPU 训练
+
+This fork has been adapted to run CodeScout RL training on Huawei Ascend 910 NPUs (64GB HBM). The adaptation is verified to produce reward curves aligned with H200 GPU training.
+
+本 fork 已适配华为昇腾 910 NPU（64GB HBM）上的 CodeScout RL 训练。经验证，训练 reward 曲线与 H200 GPU 对齐。
+
+### Requirements / 环境要求
+
+| Component | Version |
+|-----------|---------|
+| NPU | 8 × Ascend 910, 64GB HBM |
+| CANN | 8.3.RC1 |
+| Python | 3.12 |
+| torch / torch_npu | 2.8.0 / 2.8.0.post2 |
+| vllm / vllm-ascend | 0.11.0 / 0.11.0rc1 (source build) |
+| SkyRL | [codescout-npu branch](https://github.com/yucc-leon/SkyRL/tree/codescout-npu) |
+
+### Quick Start / 快速开始
+
+```bash
+# 1. Clone repos
+git clone https://github.com/yucc-leon/codescout.git && cd codescout && git checkout npu-ascend-adapt
+git clone https://github.com/yucc-leon/SkyRL.git ../SkyRL && cd ../SkyRL && git checkout codescout-npu
+cd ../codescout
+
+# 2. Setup environment (after CANN 8.3 is installed)
+bash scripts/setup_ascend_env.sh
+
+# 3. Prepare repo cache (one-time, needs GitHub access)
+python scripts/precache_repos.py \
+    --data data/swe_smith/train.parquet \
+    --cache /path/to/repo_cache
+
+# 4. Launch training (SP=2, 8×NPU)
+export REPO_CACHE=/path/to/repo_cache
+bash scripts/run_async_training_npu_sp2.sh \
+  -m /path/to/Qwen3-4B-Instruct-2507 \
+  -d ./data/swe_smith \
+  -s /path/to/ckpts \
+  -r my-npu-run
+```
+
+### Key Adaptations / 关键适配
+
+**SkyRL NPU patches** (`codescout-npu` branch on [yucc-leon/SkyRL](https://github.com/yucc-leon/SkyRL/tree/codescout-npu)):
+- `npu_support/patch_cuda.py`: Monkey-patch `torch.cuda` → `torch.npu`, NCCL → HCCL, Ray GPU → NPU, flash_attn stub with pure-PyTorch `unpad_input`/`pad_input`
+- Source patches: 9 files with `cuda→npu`, `nccl→hccl` replacements for FSDP, workers, vLLM engine
+- `model_wrapper.py`: `flash_attn` import guarded with try/except, fallback to SDPA
+
+**Training configuration**:
+- Ulysses Sequence Parallel (SP=2) to fit 40K context in 64GB HBM
+- `flash_attn=true` + `use_sample_packing=true` (required by SP)
+- HCCL for weight sync and distributed communication
+
+### Known Issues / 已知问题
+
+1. **Cannot use `uv sync` / `pyproject.toml`**: The upstream dependency setup pulls CUDA torch and upstream SkyRL. NPU environments must install dependencies manually with `--no-deps`. See the guide for details.
+   **不能使用 `uv sync` / `pyproject.toml`**：上游依赖安装会拉取 CUDA 版本的 torch 和上游 SkyRL。NPU 环境必须手动安装依赖（`--no-deps`）。
+2. **Long-sequence memory spike**: Without SP=2, `lm_head` logits tensor `(B, S, V)` causes OOM at glen > 34K on 64GB NPU. SP=2 halves the per-card sequence length.
+3. **vllm-ascend build**: PyPI version pins torch==2.7.1. Must build from source for torch 2.8. See [docs/npu-training-guide.md](docs/npu-training-guide.md).
+4. **All torch packages must use `--no-deps`**: Otherwise pip pulls CUDA torch and overwrites torch_npu.
+
+For detailed instructions, see [docs/npu-training-guide.md](docs/npu-training-guide.md).
+
+详细说明请参考 [docs/npu-training-guide.md](docs/npu-training-guide.md)。
 
 ---
 
